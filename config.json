@@ -1,0 +1,14 @@
+{
+    "bot_developer_ids": [
+        "171091643510816768",
+        "0"
+    ],
+    "log_settings": {
+        "footer_text": "CheersBot V2.0 by HomiesHouse | Discord.gg/HomiesHouse",
+        "footer_icon_url": "https://i.imgur.com/4OO5wh0.png",
+        "thumbnail_url": "https://i.imgur.com/4OO5wh0.png"
+    },
+    "default_sound": "cheers_bitch.mp3",
+    "debug": true,
+    "master_server_id": "1191385756774703194"
+}
