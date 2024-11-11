@@ -36,6 +36,47 @@ if not os.path.exists(SERVER_LOG_DIR):
 SERVER_LIST_PATH = os.path.join(SERVER_LOG_DIR, "ServerList.log")
 MASTER_SERVER_LIST_PATH = os.path.join(SERVER_LOG_DIR, "MASTERServerList.log")
 
+# Define the path for the 420Game folder
+GAME_FOLDER = os.path.join(BASE_DIR, "420Game")
+if not os.path.exists(GAME_FOLDER):
+    os.makedirs(GAME_FOLDER)
+
+# Helper function to load or create a player profile
+def load_or_create_profile(user_id):
+    profile_path = os.path.join(GAME_FOLDER, f"{user_id}.json")
+    if os.path.exists(profile_path):
+        with open(profile_path, 'r') as f:
+            return json.load(f)
+    else:
+        profile = {
+            "trap_house_name": "My First Trap",
+            "balance": 0,
+            "income_per_hour": 0,
+            "total_joints_rolled": 0,
+            "rolling_skill": 1,
+            "trap_house_age": 0,
+            "last_check_in": datetime.now().isoformat()
+        }
+        save_profile(user_id, profile)
+        return profile
+
+# Helper function to save a player profile
+def save_profile(user_id, profile):
+    profile_path = os.path.join(GAME_FOLDER, f"{user_id}.json")
+    with open(profile_path, 'w') as f:
+        json.dump(profile, f, indent=4)
+
+# Task to update trap house age and passive income
+@tasks.loop(hours=1)
+async def update_profiles_task():
+    for filename in os.listdir(GAME_FOLDER):
+        if filename.endswith(".json"):
+            user_id = filename.split(".")[0]
+            profile = load_or_create_profile(user_id)
+            profile['trap_house_age'] += 1
+            profile['balance'] += profile['income_per_hour']
+            save_profile(user_id, profile)
+
 # Load developer IDs from config.json
 def load_developer_ids():
     with open(config_path, 'r') as f:
@@ -312,6 +353,17 @@ async def log_current_time_task():
     if now.minute % 5 == 0 and now.second == 0:
         print(f"Current time is {now.strftime('%H:%M')}")
 
+# Task to update trap house age and passive income
+@tasks.loop(hours=1)
+async def update_profiles_task():
+    for filename in os.listdir(GAME_FOLDER):
+        if filename.endswith(".json"):
+            user_id = filename.split(".")[0]
+            profile = load_or_create_profile(user_id)
+            profile['trap_house_age'] += 1
+            profile['balance'] += profile['income_per_hour']
+            save_profile(user_id, profile)
+
 # Events
 @bot.event
 async def on_ready():
@@ -341,6 +393,10 @@ async def on_ready():
     
     auto_join_task.start()  # Start the auto join task
     log_current_time_task.start()  # Start the time logging task
+    update_profiles_task.start()  # Start the profile update task
+
+    # Sync game commands
+    await bot.tree.sync()
 
 async def send_intro_message(guild):
     """Send an introductory message to the appropriate channel."""
@@ -853,5 +909,105 @@ async def cheers(interaction: discord.Interaction, channel: discord.VoiceChannel
         else:
             print(f"Error during /cheers command: {e}")
 
-# Run the bot
+# Command to start the game and create a profile
+@bot.tree.command(name="start", description="Start the game and create your profile.")
+async def start(interaction: discord.Interaction):
+    user_id = interaction.user.id
+    # Ensure the game folder exists
+    if not os.path.exists(GAME_FOLDER):
+        os.makedirs(GAME_FOLDER)
+    profile = load_or_create_profile(user_id)
+    await interaction.response.send_message(f"Welcome to the game! Your trap house name is {profile['trap_house_name']}.")
+
+# Command to view the profile
+@bot.tree.command(name="profile", description="View your game profile.")
+async def profile(interaction: discord.Interaction):
+    user_id = interaction.user.id
+    profile = load_or_create_profile(user_id)
+    embed = discord.Embed(title=f"{interaction.user.name}'s Profile", color=discord.Color.green())
+    embed.add_field(name="Trap House Name", value=profile['trap_house_name'], inline=False)
+    embed.add_field(name="Balance", value=f"${profile['balance']}", inline=False)
+    embed.add_field(name="Income per Hour", value=f"${profile['income_per_hour']}", inline=False)
+    embed.add_field(name="Rolling Skill Level", value=profile['rolling_skill'], inline=False)
+    embed.add_field(name="Total Joints Rolled", value=profile['total_joints_rolled'], inline=False)
+    embed.add_field(name="Trap House Age", value=f"{profile['trap_house_age']} days", inline=False)
+    await interaction.response.send_message(embed=embed)
+
+# Command to roll some J's
+@bot.tree.command(name="roll", description="Roll some J's.")
+async def roll(interaction: discord.Interaction):
+    user_id = interaction.user.id
+    profile = load_or_create_profile(user_id)
+    rolled_js = random.randint(1, 5) * profile['rolling_skill']
+    profile['total_joints_rolled'] += rolled_js
+    save_profile(user_id, profile)
+    await interaction.response.send_message(f"You rolled {rolled_js} J's!")
+
+# Command to sell J's
+@bot.tree.command(name="sell", description="Sell your J's.")
+async def sell(interaction: discord.Interaction):
+    user_id = interaction.user.id
+    profile = load_or_create_profile(user_id)
+    earnings = profile['total_joints_rolled'] * 5  # Base price $5 per J
+    profile['balance'] += earnings
+    profile['total_joints_rolled'] = 0
+    save_profile(user_id, profile)
+    await interaction.response.send_message(f"You sold your J's for ${earnings}!")
+
+# Command to upgrade rolling skill
+@bot.tree.command(name="upgrade_rolling_skill", description="Upgrade your rolling skill.")
+async def upgrade_rolling_skill(interaction: discord.Interaction):
+    user_id = interaction.user.id
+    profile = load_or_create_profile(user_id)
+    cost = profile['rolling_skill'] * 100  # Example scaling cost
+    if profile['balance'] >= cost:
+        profile['balance'] -= cost
+        profile['rolling_skill'] += 1
+        save_profile(user_id, profile)
+        await interaction.response.send_message(f"Rolling skill upgraded to level {profile['rolling_skill']}!")
+    else:
+        await interaction.response.send_message(f"Not enough balance to upgrade. You need ${cost}.")
+
+# Command to upgrade trap house
+@bot.tree.command(name="upgrade_trap_house", description="Upgrade your trap house.")
+async def upgrade_trap_house(interaction: discord.Interaction):
+    user_id = interaction.user.id
+    profile = load_or_create_profile(user_id)
+    cost = (profile['income_per_hour'] + 1) * 500  # Example scaling cost
+    if profile['balance'] >= cost:
+        profile['balance'] -= cost
+        profile['income_per_hour'] += 10  # Example income increase
+        save_profile(user_id, profile)
+        await interaction.response.send_message(f"Trap house upgraded! Income per hour is now ${profile['income_per_hour']}.")
+    else:
+        await interaction.response.send_message(f"Not enough balance to upgrade. You need ${cost}.")
+
+# Command for daily check-in bonus
+@bot.tree.command(name="daily_check_in", description="Claim your daily check-in bonus.")
+async def daily_check_in(interaction: discord.Interaction):
+    user_id = interaction.user.id
+    profile = load_or_create_profile(user_id)
+    last_check_in = datetime.fromisoformat(profile['last_check_in'])
+    now = datetime.now()
+    if (now - last_check_in).days >= 1:
+        bonus = 100  # Example daily bonus
+        profile['balance'] += bonus
+        profile['last_check_in'] = now.isoformat()
+        save_profile(user_id, profile)
+        await interaction.response.send_message(f"Daily check-in bonus claimed! You received ${bonus}.")
+    else:
+        await interaction.response.send_message("You have already claimed your daily bonus. Come back tomorrow!")
+
+# Task to update trap house age and passive income
+@tasks.loop(hours=1)
+async def update_profiles_task():
+    for filename in os.listdir(GAME_FOLDER):
+        if filename.endswith(".json"):
+            user_id = filename.split(".")[0]
+            profile = load_or_create_profile(user_id)
+            profile['trap_house_age'] += 1
+            profile['balance'] += profile['income_per_hour']
+            save_profile(user_id, profile)
+
+# Ensure the bot starts last
 bot.run(BOT_TOKEN)
