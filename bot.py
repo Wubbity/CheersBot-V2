@@ -1,5 +1,8 @@
 # CheersBot v2 - A Discord bot by Wubbity. Cheers!
 
+# Dictionary to store temporary profiles during maintenance mode
+temp_profiles = {}
+
 import discord
 from discord.ext import commands, tasks
 from discord import app_commands
@@ -43,20 +46,41 @@ GAME_FOLDER = os.path.join(BASE_DIR, "420Game")
 if not os.path.exists(GAME_FOLDER):
     os.makedirs(GAME_FOLDER)
 
+# Define the path for the shop config
+SHOP_CONFIG_PATH = os.path.join(GAME_FOLDER, "shop_config.json")
+
+# Define the path for the UserData folder
+USER_DATA_FOLDER = os.path.join(BASE_DIR, "UserData")
+if not os.path.exists(USER_DATA_FOLDER):
+    os.makedirs(USER_DATA_FOLDER)
+
 # Helper function to load or create a player profile
 def load_or_create_profile(user_id):
-    profile_path = os.path.join(GAME_FOLDER, f"{user_id}.json")
+    profile_path = os.path.join(USER_DATA_FOLDER, f"{user_id}.json")
     if os.path.exists(profile_path):
         with open(profile_path, 'r') as f:
-            return json.load(f)
+            profile = json.load(f)
+        # Ensure the profile has all necessary fields
+        if 'start_date' not in profile:
+            profile['start_date'] = datetime.now().isoformat()
+        if 'current_joints' not in profile:
+            profile['current_joints'] = 0
+        if 'balance' not in profile:
+            profile['balance'] = 0
+        if 'income_per_hour' not in profile:
+            profile['income_per_hour'] = 0
+        save_profile(user_id, profile)
+        return profile
     else:
         profile = {
             "trap_house_name": "My First Trap",
             "balance": 0,
             "income_per_hour": 0,
             "total_joints_rolled": 0,
+            "current_joints": 0,
             "rolling_skill": 1,
             "trap_house_age": 0,
+            "start_date": datetime.now().isoformat(),
             "last_check_in": datetime.now().isoformat()
         }
         save_profile(user_id, profile)
@@ -64,9 +88,66 @@ def load_or_create_profile(user_id):
 
 # Helper function to save a player profile
 def save_profile(user_id, profile):
+    profile_path = os.path.join(USER_DATA_FOLDER, f"{user_id}.json")
+    with open(profile_path, 'w') as f:
+        json.dump(profile, f, indent=4)
+    save_profile_in_game_folder(user_id, profile)
+
+# Helper function to save a player profile in the 420Game folder
+def save_profile_in_game_folder(user_id, profile):
     profile_path = os.path.join(GAME_FOLDER, f"{user_id}.json")
     with open(profile_path, 'w') as f:
         json.dump(profile, f, indent=4)
+
+# Helper function to load or create a temporary profile during maintenance mode
+def load_or_create_temp_profile(user_id):
+    if user_id in temp_profiles:
+        return temp_profiles[user_id]
+    else:
+        profile = load_or_create_profile(user_id)
+        temp_profiles[user_id] = profile.copy()
+        return temp_profiles[user_id]
+
+# Helper function to load or create the shop config
+def load_or_create_shop_config():
+    if os.path.exists(SHOP_CONFIG_PATH):
+        with open(SHOP_CONFIG_PATH, 'r') as f:
+            return json.load(f)
+    else:
+        shop_config = {
+            "upgrades": {
+                "Blunt Rolling Tutorial": {
+                    "cost": 100,
+                    "income_per_hour": 5
+                },
+                "Cone Filler": {
+                    "cost": 500,
+                    "income_per_hour": 25
+                }
+            }
+        }
+        with open(SHOP_CONFIG_PATH, 'w') as f:
+            json.dump(shop_config, f, indent=4)
+        return shop_config
+
+# Helper function to load or create user settings
+def load_or_create_user_settings(user_id):
+    settings_path = os.path.join(USER_DATA_FOLDER, f"{user_id}.json")
+    if os.path.exists(settings_path):
+        with open(settings_path, 'r') as f:
+            return json.load(f)
+    else:
+        settings = {
+            "payment_mode": "over_time"  # Default setting
+        }
+        save_user_settings(user_id, settings)
+        return settings
+
+# Helper function to save user settings
+def save_user_settings(user_id, settings):
+    settings_path = os.path.join(USER_DATA_FOLDER, f"{user_id}.json")
+    with open(settings_path, 'w') as f:
+        json.dump(settings, f, indent=4)
 
 # Task to update trap house age and passive income
 @tasks.loop(hours=1)
@@ -75,7 +156,8 @@ async def update_profiles_task():
         if filename.endswith(".json"):
             user_id = filename.split(".")[0]
             profile = load_or_create_profile(user_id)
-            profile['trap_house_age'] += 1
+            start_date = datetime.fromisoformat(profile.get('start_date', datetime.now().isoformat()))
+            profile['trap_house_age'] = (datetime.now() - start_date).days
             profile['balance'] += profile['income_per_hour']
             save_profile(user_id, profile)
 
@@ -107,7 +189,7 @@ def load_or_create_server_config(guild_id):
     config_file = os.path.join(BASE_DIR, f"configs/config_{guild_id}.json")
     
     # If the config file exists, load it
-    if os.path.exists(config_file):
+    if (os.path.exists(config_file)):
         with open(config_file, 'r') as f:
             config = json.load(f)
     else:
@@ -362,9 +444,23 @@ async def update_profiles_task():
         if filename.endswith(".json"):
             user_id = filename.split(".")[0]
             profile = load_or_create_profile(user_id)
-            profile['trap_house_age'] += 1
+            start_date = datetime.fromisoformat(profile.get('start_date', datetime.now().isoformat()))
+            profile['trap_house_age'] = (datetime.now() - start_date).days
             profile['balance'] += profile['income_per_hour']
             save_profile(user_id, profile)
+
+# Task to update user settings at the top of the hour
+@tasks.loop(seconds=1)
+async def update_user_settings_task():
+    now = datetime.now(timezone.utc)
+    if now.minute == 0 and now.second == 0:
+        for filename in os.listdir(USER_DATA_FOLDER):
+            if filename.endswith(".json"):
+                user_id = filename.split(".")[0]
+                settings = load_or_create_user_settings(user_id)
+                if settings.get("payment_mode") == "over_time":
+                    settings["payment_mode"] = "lump_sum"
+                    save_user_settings(user_id, settings)
 
 # Events
 @bot.event
@@ -396,6 +492,7 @@ async def on_ready():
     auto_join_task.start()  # Start the auto join task
     log_current_time_task.start()  # Start the time logging task
     update_profiles_task.start()  # Start the profile update task
+    update_user_settings_task.start()  # Start the user settings update task
 
     # Sync game commands
     await bot.tree.sync()
@@ -463,9 +560,15 @@ async def on_guild_remove(guild):
 async def auto_join_task():
     """Check every second and trigger at X:15:00 UTC to join voice channels and X:20:00 to play sound."""
     now = datetime.now(timezone.utc)
+    if debug_mode:
+        print(f"Checking time: {now.strftime('%H:%M:%S')} UTC")  # Debug print to check current time
     if now.minute == 15 and now.second == 0:  # Trigger exactly at X:15:00
+        if debug_mode:
+            print("Triggering join_all_populated_voice_channels")  # Debug print for join trigger
         await join_all_populated_voice_channels()
     elif now.minute == 20 and now.second == 0:  # Trigger exactly at X:20:00
+        if debug_mode:
+            print("Triggering play_sound_in_all_channels")  # Debug print for play sound trigger
         await play_sound_in_all_channels()
 
 async def join_all_populated_voice_channels():
@@ -911,62 +1014,236 @@ async def cheers(interaction: discord.Interaction, channel: discord.VoiceChannel
         else:
             print(f"Error during /cheers command: {e}")
 
+@bot.tree.command(name="reset_game_data", description="Reset/delete all user data from the 420Game. Bot developer only command.")
+async def reset_game_data(interaction: discord.Interaction):
+    if not is_developer(interaction):
+        await interaction.response.send_message("You do not have permission to use this command. Why did you try to do that..", ephemeral=True)
+        return
+
+    try:
+        # Remove all user profiles from the UserData folder
+        for filename in os.listdir(USER_DATA_FOLDER):
+            if filename.endswith(".json"):
+                file_path = os.path.join(USER_DATA_FOLDER, filename)
+                os.remove(file_path)
+
+        # Remove all user profiles from the 420Game folder
+        for filename in os.listdir(GAME_FOLDER):
+            if filename != "shop_config.json" and filename.endswith(".json"):
+                file_path = os.path.join(GAME_FOLDER, filename)
+                os.remove(file_path)
+
+        await interaction.response.send_message("All user data from the 420Game has been reset/deleted.", ephemeral=True)
+    except Exception as e:
+        await interaction.response.send_message(f"An error occurred while resetting game data: {e}", ephemeral=True)
+
 # Command to start the game and create a profile
 @bot.tree.command(name="start", description="Start the game and create your profile.")
 async def start(interaction: discord.Interaction):
     user_id = interaction.user.id
+    profile_path = os.path.join(USER_DATA_FOLDER, f"{user_id}.json")
+    
+    if os.path.exists(profile_path):
+        await interaction.response.send_message("You already have a profile. Use `/profile` to check your stats.", ephemeral=True)
+        return
+    
     # Ensure the game folder exists
     if not os.path.exists(GAME_FOLDER):
         os.makedirs(GAME_FOLDER)
+    
     profile = load_or_create_profile(user_id)
     await interaction.response.send_message(f"Welcome to the game! Your trap house name is {profile['trap_house_name']}.")
+
+# Helper function to check if the user has started the game
+def has_started_game(user_id):
+    profile_path = os.path.join(GAME_FOLDER, f"{user_id}.json")
+    return os.path.exists(profile_path)
+
+# Helper function to prompt the user to start the game
+async def prompt_start_game(interaction):
+    embed = discord.Embed(
+        title="Start the Game",
+        description="You need to start the game before using this command. Please run the `/start` command to begin.",
+        color=discord.Color.red()
+    )
+    await interaction.response.send_message(embed=embed, ephemeral=True)
 
 # Command to view the profile
 @bot.tree.command(name="profile", description="View your game profile.")
 async def profile(interaction: discord.Interaction):
     user_id = interaction.user.id
-    profile = load_or_create_profile(user_id)
+
+    if not has_started_game(user_id):
+        await prompt_start_game(interaction)
+        return
+
+    if debug_mode:
+        profile = load_or_create_temp_profile(user_id)
+    else:
+        profile = load_or_create_profile(user_id)
+    
+    # Ensure all necessary fields are present in the profile
+    required_fields = ["trap_house_name", "balance", "income_per_hour", "rolling_skill", "current_joints", "total_joints_rolled", "trap_house_age", "start_date"]
+    for field in required_fields:
+        if field not in profile:
+            profile[field] = 0 if field != "trap_house_name" else "My First Trap"
+    
     embed = discord.Embed(title=f"{interaction.user.name}'s Profile", color=discord.Color.green())
     embed.add_field(name="Trap House Name", value=profile['trap_house_name'], inline=False)
     embed.add_field(name="Balance", value=f"${profile['balance']}", inline=False)
     embed.add_field(name="Income per Hour", value=f"${profile['income_per_hour']}", inline=False)
     embed.add_field(name="Rolling Skill Level", value=profile['rolling_skill'], inline=False)
+    embed.add_field(name="Current Joints", value=profile['current_joints'], inline=False)
     embed.add_field(name="Total Joints Rolled", value=profile['total_joints_rolled'], inline=False)
-    embed.add_field(name="Trap House Age", value=f"{profile['trap_house_age']} days", inline=False)
+    embed.add_field(name="Trap House Age", value=f"{profile['trap_house_age']} days (Started: <t:{int(datetime.fromisoformat(profile['start_date']).timestamp())}:D>)", inline=False)
     await interaction.response.send_message(embed=embed)
+
+# Dictionary to store user cooldowns
+user_cooldowns = {}
+
+# Dictionary to store original profiles before maintenance mode
+original_profiles = {}
+
+# Dictionary to store temporary profiles during maintenance mode
+temp_profiles = {}
+
+class RollMoreButton(ui.Button):
+    def __init__(self):
+        super().__init__(label="Roll more", style=ButtonStyle.green)
+
+    async def callback(self, interaction: Interaction):
+        await roll.callback(interaction)  # Use the callback method of the command
+
+# Helper function to check if the user has started the game
+def has_started_game(user_id):
+    profile_path = os.path.join(GAME_FOLDER, f"{user_id}.json")
+    return os.path.exists(profile_path)
+
+# Helper function to prompt the user to start the game
+async def prompt_start_game(interaction):
+    embed = discord.Embed(
+        title="Start the Game",
+        description="You need to start the game before using this command. Please run the `/start` command to begin.",
+        color=discord.Color.red()
+    )
+    await interaction.response.send_message(embed=embed, ephemeral=True)
 
 # Command to roll some J's
 @bot.tree.command(name="roll", description="Roll some J's.")
 async def roll(interaction: discord.Interaction):
     user_id = interaction.user.id
-    profile = load_or_create_profile(user_id)
-    rolled_js = random.randint(1, 5) * profile['rolling_skill']
+
+    if not has_started_game(user_id):
+        await prompt_start_game(interaction)
+        return
+
+    now = datetime.now()
+
+    if not debug_mode:
+        # Check if the user is on cooldown
+        if user_id in user_cooldowns:
+            cooldown_end = user_cooldowns[user_id]
+            if now < cooldown_end:
+                seconds_left = int((cooldown_end - now).total_seconds())
+                embed = discord.Embed(
+                    title="Cooldown Active",
+                    description=f"You can't roll that fast! You can roll again in <t:{int(cooldown_end.timestamp())}:R>.",
+                    color=discord.Color.red()
+                )
+                await interaction.response.send_message(embed=embed, ephemeral=True)
+                return
+
+    if debug_mode:
+        profile = load_or_create_temp_profile(user_id)
+    else:
+        profile = load_or_create_profile(user_id)
+    
+    rolled_js = random.randint(1, 5) * profile['rolling_skill']  # Use rolling skill to determine the number of J's rolled
+    profile['current_joints'] += rolled_js
     profile['total_joints_rolled'] += rolled_js
-    save_profile(user_id, profile)
-    await interaction.response.send_message(f"You rolled {rolled_js} J's!")
+
+    if not debug_mode:
+        save_profile(user_id, profile)
+    else:
+        temp_profiles[user_id] = profile
+
+    view = ui.View()
+    view.add_item(RollMoreButton())
+
+    maintenance_message = " The bot is in maintenance mode and your game statistics will not be saved. When this message disappears, your stats will be saving again." if debug_mode else ""
+    embed = discord.Embed(
+        title="Rolling J's",
+        description=f"You rolled {rolled_js} J's! You now have a total of {profile['current_joints']} J's.{maintenance_message}",
+        color=discord.Color.green()
+    )
+    await interaction.response.send_message(embed=embed, view=view)
 
 # Command to sell J's
 @bot.tree.command(name="sell", description="Sell your J's.")
 async def sell(interaction: discord.Interaction):
     user_id = interaction.user.id
-    profile = load_or_create_profile(user_id)
-    earnings = profile['total_joints_rolled'] * 5  # Base price $5 per J
+
+    if not has_started_game(user_id):
+        await prompt_start_game(interaction)
+        return
+
+    if debug_mode:
+        profile = load_or_create_temp_profile(user_id)
+    else:
+        profile = load_or_create_profile(user_id)
+    
+    sold_js = profile['current_joints']
+    earnings = sold_js * 5  # Base price $5 per J
     profile['balance'] += earnings
-    profile['total_joints_rolled'] = 0
-    save_profile(user_id, profile)
-    await interaction.response.send_message(f"You sold your J's for ${earnings}!")
+    profile['current_joints'] = 0
+
+    if not debug_mode:
+        save_profile(user_id, profile)
+    else:
+        temp_profiles[user_id] = profile
+
+    await interaction.response.send_message(f"You sold {sold_js} J's for ${earnings}!")
 
 # Command to upgrade rolling skill
 @bot.tree.command(name="upgrade_rolling_skill", description="Upgrade your rolling skill.")
 async def upgrade_rolling_skill(interaction: discord.Interaction):
     user_id = interaction.user.id
-    profile = load_or_create_profile(user_id)
-    cost = profile['rolling_skill'] * 100  # Example scaling cost
+
+    if not has_started_game(user_id):
+        await prompt_start_game(interaction)
+        return
+
+    if debug_mode:
+        profile = load_or_create_temp_profile(user_id)
+    else:
+        profile = load_or_create_profile(user_id)
+    
+    current_skill = profile['rolling_skill']
+    cost = current_skill * 100  # Example scaling cost
+    next_cost = (current_skill + 1) * 100  # Cost for the next upgrade
+
     if profile['balance'] >= cost:
         profile['balance'] -= cost
         profile['rolling_skill'] += 1
-        save_profile(user_id, profile)
-        await interaction.response.send_message(f"Rolling skill upgraded to level {profile['rolling_skill']}!")
+        new_skill = profile['rolling_skill']
+        new_range = f"{new_skill} to {new_skill * 5} J's"
+
+        if not debug_mode:
+            save_profile(user_id, profile)
+        else:
+            temp_profiles[user_id] = profile
+
+        embed = discord.Embed(
+            title="Rolling Skill Upgraded",
+            description=(
+                f"Rolling skill upgraded to level {new_skill}!\n"
+                f"New range of J's you can roll: {new_range}\n"
+                f"Amount spent: ${cost}\n"
+                f"Next upgrade cost: ${next_cost}"
+            ),
+            color=discord.Color.green()
+        )
+        await interaction.response.send_message(embed=embed)
     else:
         await interaction.response.send_message(f"Not enough balance to upgrade. You need ${cost}.")
 
@@ -974,42 +1251,423 @@ async def upgrade_rolling_skill(interaction: discord.Interaction):
 @bot.tree.command(name="upgrade_trap_house", description="Upgrade your trap house.")
 async def upgrade_trap_house(interaction: discord.Interaction):
     user_id = interaction.user.id
-    profile = load_or_create_profile(user_id)
+
+    if not has_started_game(user_id):
+        await prompt_start_game(interaction)
+        return
+
+    if debug_mode:
+        profile = load_or_create_temp_profile(user_id)
+    else:
+        profile = load_or_create_profile(user_id)
+    
     cost = (profile['income_per_hour'] + 1) * 500  # Example scaling cost
     if profile['balance'] >= cost:
         profile['balance'] -= cost
         profile['income_per_hour'] += 10  # Example income increase
-        save_profile(user_id, profile)
+
+        if not debug_mode:
+            save_profile(user_id, profile)
+        else:
+            temp_profiles[user_id] = profile
+
         await interaction.response.send_message(f"Trap house upgraded! Income per hour is now ${profile['income_per_hour']}.")
     else:
         await interaction.response.send_message(f"Not enough balance to upgrade. You need ${cost}.")
 
 # Command for daily check-in bonus
-@bot.tree.command(name="daily_check_in", description="Claim your daily check-in bonus.")
-async def daily_check_in(interaction: discord.Interaction):
+@bot.tree.command(name="daily", description="Claim your daily check-in bonus.")
+async def daily(interaction: discord.Interaction):
     user_id = interaction.user.id
-    profile = load_or_create_profile(user_id)
+
+    if not has_started_game(user_id):
+        await prompt_start_game(interaction)
+        return
+
+    if debug_mode:
+        profile = load_or_create_temp_profile(user_id)
+    else:
+        profile = load_or_create_profile(user_id)
+    
     last_check_in = datetime.fromisoformat(profile['last_check_in'])
     now = datetime.now()
     if (now - last_check_in).days >= 1:
-        bonus = 100  # Example daily bonus
+        bonus = 1000  # Updated daily bonus
         profile['balance'] += bonus
         profile['last_check_in'] = now.isoformat()
-        save_profile(user_id, profile)
+
+        if not debug_mode:
+            save_profile(user_id, profile)
+        else:
+            temp_profiles[user_id] = profile
+
         await interaction.response.send_message(f"Daily check-in bonus claimed! You received ${bonus}.")
     else:
-        await interaction.response.send_message("You have already claimed your daily bonus. Come back tomorrow!")
+        next_check_in = last_check_in + timedelta(days=1)
+        await interaction.response.send_message(f"You have already claimed your daily bonus. Come back <t:{int(next_check_in.timestamp())}:R>!")
 
-# Task to update trap house age and passive income
-@tasks.loop(hours=1)
-async def update_profiles_task():
-    for filename in os.listdir(GAME_FOLDER):
-        if filename.endswith(".json"):
-            user_id = filename.split(".")[0]
-            profile = load_or_create_profile(user_id)
-            profile['trap_house_age'] += 1
-            profile['balance'] += profile['income_per_hour']
-            save_profile(user_id, profile)
+# Command to show balance
+@bot.tree.command(name="balance", description="Show your current balance.")
+async def balance(interaction: discord.Interaction):
+    user_id = interaction.user.id
 
-# Ensure the bot starts last
+    if not has_started_game(user_id):
+        await prompt_start_game(interaction)
+        return
+
+    if debug_mode:
+        profile = load_or_create_temp_profile(user_id)
+    else:
+        profile = load_or_create_profile(user_id)
+    
+    embed = discord.Embed(
+        title=f"{interaction.user.name}'s Balance",
+        description=f"Your current balance is ${profile['balance']}.",
+        color=discord.Color.green()
+    )
+    await interaction.response.send_message(embed=embed)
+
+# Command to view the shop
+@bot.tree.command(name="shop", description="View available upgrades in the shop.")
+async def shop(interaction: discord.Interaction):
+    user_id = interaction.user.id
+
+    if not has_started_game(user_id):
+        await prompt_start_game(interaction)
+        return
+
+    shop_config = load_or_create_shop_config()
+    upgrades = shop_config.get("upgrades", {})
+    
+    embed = discord.Embed(title="Shop - Upgrades", color=discord.Color.blue())
+    for upgrade_name, upgrade_info in upgrades.items():
+        embed.add_field(
+            name=upgrade_name,
+            value=f"Cost: ${upgrade_info['cost']}\nIncome per Hour: ${upgrade_info['income_per_hour']}",
+            inline=False
+        )
+    await interaction.response.send_message(embed=embed)
+
+# Command to buy an upgrade
+@bot.tree.command(name="buy_upgrade", description="Buy an upgrade from the shop.")
+@app_commands.describe(upgrade_name="The name of the upgrade to buy.")
+async def buy_upgrade(interaction: discord.Interaction, upgrade_name: str):
+    user_id = interaction.user.id
+
+    if not has_started_game(user_id):
+        await prompt_start_game(interaction)
+        return
+
+    if debug_mode:
+        profile = load_or_create_temp_profile(user_id)
+    else:
+        profile = load_or_create_profile(user_id)
+    
+    shop_config = load_or_create_shop_config()
+    upgrades = shop_config.get("upgrades", {})
+
+    if upgrade_name not in upgrades:
+        await interaction.response.send_message("Invalid upgrade name.", ephemeral=True)
+        return
+
+    upgrade_info = upgrades[upgrade_name]
+    cost = upgrade_info["cost"]
+    income_per_hour = upgrade_info["income_per_hour"]
+
+    if profile["balance"] < cost:
+        await interaction.response.send_message(f"Not enough balance to buy {upgrade_name}. You need ${cost}.", ephemeral=True)
+        return
+
+    profile["balance"] -= cost
+    profile["income_per_hour"] += income_per_hour
+
+    if not debug_mode:
+        save_profile(user_id, profile)
+    else:
+        temp_profiles[user_id] = profile
+
+    await interaction.response.send_message(f"Successfully bought {upgrade_name}! Your income per hour is now ${profile['income_per_hour']}.")
+
+class PaymentModeButton(ui.Button):
+    def __init__(self, label, style, user_id, current_mode):
+        super().__init__(label=label, style=style)
+        self.user_id = user_id
+        self.current_mode = current_mode
+
+    async def callback(self, interaction: Interaction):
+        new_mode = "lump_sum" if self.label == "Lump Sum" else "over_time"
+        if new_mode == "lump_sum" and self.current_mode == "over_time":
+            await interaction.response.send_message(
+                "Your payment mode will change to Lump Sum at the top of the hour.", ephemeral=True
+            )
+        else:
+            settings = load_or_create_user_settings(self.user_id)
+            settings["payment_mode"] = new_mode
+            save_user_settings(self.user_id, settings)
+            await interaction.response.send_message(f"Payment mode set to {self.label}.", ephemeral=True)
+
+class UserSettingsView(ui.View):
+    def __init__(self, user_id, current_mode):
+        super().__init__(timeout=180)  # 3 minutes timeout for interaction
+        self.user_id = user_id
+        self.current_mode = current_mode
+
+        lump_sum_style = ButtonStyle.green if current_mode == "lump_sum" else ButtonStyle.grey
+        over_time_style = ButtonStyle.green if current_mode == "over_time" else ButtonStyle.grey
+
+        self.add_item(PaymentModeButton("Lump Sum", lump_sum_style, user_id, current_mode))
+        self.add_item(PaymentModeButton("Over Time", over_time_style, user_id, current_mode))
+
+@bot.tree.command(name="usersettings", description="Configure your payment settings.")
+async def usersettings(interaction: discord.Interaction):
+    user_id = interaction.user.id
+    settings = load_or_create_user_settings(user_id)
+    current_mode = settings.get("payment_mode", "over_time")
+
+    embed = discord.Embed(
+        title="User Settings",
+        description="Choose your payment mode:",
+        color=discord.Color.blue()
+    )
+    embed.add_field(name="Lump Sum", value="Get paid your full hourly pay at the top of each hour.", inline=False)
+    embed.add_field(name="Over Time", value="Get paid your full hourly pay gradually over the course of the hour.", inline=False)
+
+    view = UserSettingsView(user_id, current_mode)
+    await interaction.response.send_message(embed=embed, view=view, ephemeral=True)
+    
+    # Command to toggle maintenance mode
+@bot.tree.command(name="maintenance", description="This command is restricted to @Wubbity - Puts bot in maintenance mode.")
+async def maintenance(interaction: discord.Interaction):
+    if not (is_developer(interaction) or interaction.guild.id == master_server_id):
+        await interaction.response.send_message("You do not have permission to use this command.", ephemeral=True)
+        return
+
+    global debug_mode
+    debug_mode = not debug_mode
+    global_config["debug"] = debug_mode
+
+    # Save the updated debug mode to config.json
+    with open(config_path, 'w') as f:
+        json.dump(global_config, f, indent=4)
+
+    if not debug_mode:
+        # Restore original profiles
+        for user_id, original_profile in original_profiles.items():
+            save_profile(user_id, original_profile)
+        original_profiles.clear()
+        temp_profiles.clear()
+
+    status = "enabled" if debug_mode else "disabled"
+    await interaction.response.send_message(f"Maintenance mode {status}.", ephemeral=True)
+
+@bot.tree.command(name="meetthedev", description="Meet the developer of CheersBot.")
+async def meetthedev(interaction: discord.Interaction):
+    with open(config_path, 'r') as f:
+        global_config = json.load(f)
+    
+    discord_link = global_config.get("discord_link", "https://discord.gg/HomiesHouse")
+    website = global_config.get("website", "https://HomiesHouse.net")
+    developer_ids = global_config.get("bot_developer_ids", [])
+    owner_mentions = ', '.join([f"<@{owner_id}>" for owner_id in developer_ids])
+    
+    embed = discord.Embed(
+        title="Meet the Developer",
+        description="Learn more about the creators of CheersBot!",
+        color=discord.Color.blue()
+    )
+    embed.add_field(name="Discord Link", value=f"[Join our Discord]({discord_link})", inline=False)
+    embed.add_field(name="Website", value=f"[Visit our Website]({website})", inline=False)
+    embed.add_field(name="Owners", value=owner_mentions, inline=False)
+    
+    await interaction.response.send_message(embed=embed)
+
+class BuyUpgradeButton(ui.Button):
+    def __init__(self, upgrade_name, user_id, row):
+        super().__init__(label=f"Buy {upgrade_name}", style=ButtonStyle.green, row=row)
+        self.upgrade_name = upgrade_name
+        self.user_id = user_id
+
+    async def callback(self, interaction: Interaction):
+        await handle_buy_upgrade(interaction, self.upgrade_name)
+
+class BuyAgainButton(ui.Button):
+    def __init__(self, upgrade_name, user_id, row):
+        super().__init__(label=f"Buy {upgrade_name} Again", style=ButtonStyle.blurple, row=row)
+        self.upgrade_name = upgrade_name
+        self.user_id = user_id
+
+    async def callback(self, interaction: Interaction):
+        await handle_buy_upgrade(interaction, self.upgrade_name)
+
+class UpgradesView(ui.View):
+    def __init__(self, user_id, upgrades, profile):
+        super().__init__(timeout=180)  # 3 minutes timeout for interaction
+        self.user_id = user_id
+        self.upgrades = upgrades
+        self.profile = profile
+
+        for idx, (upgrade_name, upgrade_info) in enumerate(upgrades.items()):
+            row = idx // 2  # 2 buttons per row
+            self.add_item(BuyUpgradeButton(upgrade_name, user_id, row=row))
+
+async def handle_buy_upgrade(interaction: discord.Interaction, upgrade_name: str):
+    user_id = interaction.user.id
+
+    if not has_started_game(user_id):
+        await prompt_start_game(interaction)
+        return
+
+    if debug_mode:
+        profile = load_or_create_temp_profile(user_id)
+    else:
+        profile = load_or_create_profile(user_id)
+    
+    shop_config = load_or_create_shop_config()
+    upgrades = shop_config.get("upgrades", {})
+
+    if upgrade_name not in upgrades:
+        await interaction.response.send_message("Invalid upgrade name.", ephemeral=True)
+        return
+
+    upgrade_info = upgrades[upgrade_name]
+    cost = upgrade_info["cost"]
+    income_per_hour = upgrade_info["income_per_hour"]
+
+    if profile["balance"] < cost:
+        await interaction.response.send_message(f"Not enough balance to buy {upgrade_name}. You need ${cost}.", ephemeral=True)
+        return
+
+    profile["balance"] -= cost
+    profile["income_per_hour"] += income_per_hour
+
+    if not debug_mode:
+        save_profile(user_id, profile)
+    else:
+        temp_profiles[user_id] = profile
+
+    next_cost = cost  # Assuming the cost remains the same for simplicity
+    await interaction.response.send_message(
+        f"Successfully bought {upgrade_name}! Your income per hour is now ${profile['income_per_hour']}. "
+        f"Next upgrade will cost ${next_cost}.",
+        ephemeral=True
+    )
+
+    # Update the view to show only the "Buy Again" button
+    view = ui.View()
+    view.add_item(BuyAgainButton(upgrade_name, user_id, row=0))
+    await interaction.edit_original_response(view=view)
+
+@bot.tree.command(name="upgrades", description="View and purchase available upgrades.")
+async def upgrades(interaction: discord.Interaction):
+    user_id = interaction.user.id
+
+    if not has_started_game(user_id):
+        await prompt_start_game(interaction)
+        return
+
+    if debug_mode:
+        profile = load_or_create_temp_profile(user_id)
+    else:
+        profile = load_or_create_profile(user_id)
+    
+    shop_config = load_or_create_shop_config()
+    upgrades = shop_config.get("upgrades", {})
+
+    embed = discord.Embed(title="Available Upgrades", color=discord.Color.blue())
+    for upgrade_name, upgrade_info in upgrades.items():
+        cost = upgrade_info["cost"]
+        income_per_hour = upgrade_info["income_per_hour"]
+        embed.add_field(
+            name=upgrade_name,
+            value=f"Cost: ${cost}\nIncome per Hour: +${income_per_hour}",
+            inline=False
+        )
+    embed.add_field(name="Current Balance", value=f"${profile['balance']}", inline=False)
+
+    view = UpgradesView(user_id, upgrades, profile)
+    await interaction.response.send_message(embed=embed, view=view, ephemeral=True)
+
+class LeaderboardButton(ui.Button):
+    def __init__(self, label, style, sort_key, is_global, interaction):
+        super().__init__(label=label, style=style)
+        self.sort_key = sort_key
+        self.is_global = is_global
+        self.interaction = interaction
+
+    async def callback(self, interaction: Interaction):
+        await display_leaderboard(interaction, self.sort_key, self.is_global)
+
+class LeaderboardView(ui.View):
+    def __init__(self, interaction, sort_key, is_global):
+        super().__init__(timeout=180)  # 3 minutes timeout for interaction
+        self.interaction = interaction
+        self.sort_key = sort_key
+        self.is_global = is_global
+
+        self.add_item(LeaderboardButton("Balance", ButtonStyle.blurple, "balance", is_global, interaction))
+        self.add_item(LeaderboardButton("Income per Hour", ButtonStyle.blurple, "income_per_hour", is_global, interaction))
+        self.add_item(LeaderboardButton("Rolling Skill", ButtonStyle.blurple, "rolling_skill", is_global, interaction))
+        self.add_item(LeaderboardButton("Current Joints", ButtonStyle.blurple, "current_joints", is_global, interaction))
+        self.add_item(LeaderboardButton("Total Joints Rolled", ButtonStyle.blurple, "total_joints_rolled", is_global, interaction))
+        self.add_item(LeaderboardButton("Toggle Local/Global", ButtonStyle.green, sort_key, not is_global, interaction))
+
+async def display_leaderboard(interaction: discord.Interaction, sort_key: str, is_global: bool):
+    profiles = []
+    if is_global:
+        for filename in os.listdir(GAME_FOLDER):
+            if filename.endswith(".json"):
+                user_id = filename.split(".")[0]
+                if user_id.isdigit():  # Ensure the user_id is a valid integer
+                    profile = load_or_create_profile(user_id)
+                    profiles.append((user_id, profile))
+    else:
+        guild = interaction.guild
+        for member in guild.members:
+            if not member.bot:
+                user_id = str(member.id)
+                profile_path = os.path.join(GAME_FOLDER, f"{user_id}.json")
+                if os.path.exists(profile_path):
+                    profile = load_or_create_profile(user_id)
+                    profiles.append((user_id, profile))
+
+    sorted_profiles = sorted(profiles, key=lambda x: x[1].get(sort_key, 0), reverse=True)
+    embed = discord.Embed(title=f"Leaderboard - {sort_key.replace('_', ' ').title()} ({'Global' if is_global else 'Local'})", color=discord.Color.blue())
+
+    for idx, (user_id, profile) in enumerate(sorted_profiles[:10], start=1):
+        user = interaction.guild.get_member(int(user_id)) if not is_global else bot.get_user(int(user_id))
+        if user:  # Ensure the user exists
+            embed.add_field(name=f"{idx}. {user.name}", value=f"{sort_key.replace('_', ' ').title()}: {profile.get(sort_key, 0)}", inline=False)
+
+    view = LeaderboardView(interaction, sort_key, is_global)
+    await interaction.response.send_message(embed=embed, view=view, ephemeral=True)
+
+@bot.tree.command(name="leaderboard", description="View the game leaderboard.")
+async def leaderboard(interaction: discord.Interaction):
+    await display_leaderboard(interaction, "balance", is_global=False)
+
+# Command to rename the trap house
+@bot.tree.command(name="rename", description="Rename your trap house.")
+@app_commands.describe(new_name="The new name for your trap house.")
+async def rename(interaction: discord.Interaction, new_name: str):
+    user_id = interaction.user.id
+
+    if not has_started_game(user_id):
+        await prompt_start_game(interaction)
+        return
+
+    if debug_mode:
+        profile = load_or_create_temp_profile(user_id)
+    else:
+        profile = load_or_create_profile(user_id)
+
+    profile['trap_house_name'] = new_name
+
+    if not debug_mode:
+        save_profile(user_id, profile)
+    else:
+        temp_profiles[user_id] = profile
+
+    await interaction.response.send_message(f"Your trap house has been renamed to: {new_name}")
+
 bot.run(BOT_TOKEN)
+

@@ -15,6 +15,9 @@ The Public Version of CheersBot - A complete rewrite!
   - [/reload](#reload)
   - [/setup-info](#setup-info)
   - [/cheers](#cheers)
+  - [/maintenance](#maintenance)
+  - [/start](#start)
+- [Games](#games)
 - [Configuration](#configuration)
 - [Logging](#logging)
 - [Developer Information](#developer-information)
@@ -90,6 +93,86 @@ CheersBot V2 is a Discord bot designed to enhance your server with fun and usefu
 **Description**: Play the cheers sound in a voice channel.
 
 **Usage**: `/cheers channel:<VoiceChannel>`
+
+### /maintenance
+
+**Description**: This command is restricted to @Wubbity - Puts bot in maintenance mode.
+
+**Usage**: `/maintenance`
+
+## 420Game Commands
+
+### /start
+
+**Description**: Start the game and create your profile. All other game commands require /start to be ran before using them for the first time.
+
+**Usage**: `/start`
+
+### /profile
+
+**Description**: View your game profile.
+
+**Usage**: `/profile`
+
+### /roll
+
+**Description**: Roll some J's.
+
+**Usage**: `/roll`
+
+### /sell
+
+**Description**: Sell your J's.
+
+**Usage**: `/sell`
+
+### /upgrade_rolling_skill
+
+**Description**: Upgrade your rolling skill.
+
+**Usage**: `/upgrade_rolling_skill`
+
+### /upgrade_trap_house
+
+**Description**: Upgrade your trap house.
+
+**Usage**: `/upgrade_trap_house`
+
+### /daily
+
+**Description**: Claim your daily check-in bonus.
+
+**Usage**: `/daily`
+
+### /balance
+
+**Description**: Show your current balance.
+
+**Usage**: `/balance`
+
+### /shop
+
+**Description**: View available upgrades in the shop.
+
+**Usage**: `/shop`
+
+### /buy_upgrade
+
+**Description**: Buy an upgrade from the shop.
+
+**Usage**: `/buy_upgrade upgrade_name:<UpgradeName>`
+
+### /upgrades
+
+**Description**: View and purchase available upgrades.
+
+**Usage**: `/upgrades`
+
+### /leaderboard
+
+**Description**: View the game leaderboard.
+
+**Usage**: `/leaderboard`
 
 ## Configuration
 
