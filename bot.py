@@ -1,3 +1,5 @@
+# CheersBot v2 - A Discord bot by Wubbity. Cheers!
+
 import discord
 from discord.ext import commands, tasks
 from discord import app_commands
