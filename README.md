@@ -17,7 +17,7 @@ The Public Version of CheersBot - A complete rewrite!
   - [/cheers](#cheers)
   - [/maintenance](#maintenance)
   - [/start](#start)
-- [Games](#games)
+- [Games](420game-Commands)
 - [Configuration](#configuration)
 - [Logging](#logging)
 - [Developer Information](#developer-information)
