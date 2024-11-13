@@ -15,12 +15,25 @@ The Public Version of CheersBot - A complete rewrite!
   - [/reload](#reload)
   - [/setup-info](#setup-info)
   - [/cheers](#cheers)
-  - [/maintenance](#maintenance)
 - [420Game Commands](#420game-commands)
   - [/start](#start)
+  - [/profile](#profile)
+  - [/roll](#roll)
+  - [/sell](#sell)
+  - [/upgrade_rolling_skill](#upgrade_rolling_skill)
+  - [/upgrade_trap_house](#upgrade_trap_house)
+  - [/daily](#daily)
+  - [/balance](#balance)
+  - [/shop](#shop)
+  - [/buy_upgrade](#buy_upgrade)
+  - [/upgrades](#upgrades)
+  - [/leaderboard](#leaderboard)
+  - [/rename](#rename)
+  - [/blacklist](#blacklist)
 - [Configuration](#configuration)
 - [Logging](#logging)
 - [Developer Information](#developer-information)
+  - [/meetthedev](#meetthedev)
 
 ## Introduction
 
@@ -33,7 +46,6 @@ CheersBot V2 is a Discord bot designed to enhance your server with fun and usefu
 - Configure bot settings per server.
 - Log actions to a specified channel.
 - Admin role management.
-- Developer-specific commands.
 
 ## Commands
 
@@ -93,12 +105,6 @@ CheersBot V2 is a Discord bot designed to enhance your server with fun and usefu
 **Description**: Play the cheers sound in a voice channel.
 
 **Usage**: `/cheers channel:<VoiceChannel>`
-
-### /maintenance
-
-**Description**: This command is restricted to @Wubbity - Puts bot in maintenance mode.
-
-**Usage**: `/maintenance`
 
 ## 420Game Commands
 
@@ -174,6 +180,24 @@ CheersBot V2 is a Discord bot designed to enhance your server with fun and usefu
 
 **Usage**: `/leaderboard`
 
+### /rename
+
+**Description**: Rename your trap house.
+
+**Usage**: `/rename new_name:<NewName>`
+
+### /blacklist
+
+**Description**: Manage the blacklist of channels for auto-join.
+
+**Usage**: `/blacklist action:<add|remove|list> channel:<VoiceChannel>`
+
+### /usersettings
+
+**Description**: Configure your payment settings.
+
+**Usage**: `/usersettings`
+
 ## Configuration
 
 The bot uses a configuration file (`config.json`) to store global settings. Here is an example configuration:
@@ -207,6 +231,12 @@ The bot logs actions to a specified channel and maintains server logs in the `se
 ## Developer Information
 
 The bot includes developer-specific functionalities and commands. Developer IDs are specified in the `config.json` file.
+
+### /meetthedev
+
+**Description**: Meet the developer of CheersBot - @Wubbity.
+
+**Usage**: `/meetthedev`
 
 For any issues or support, please reach out to the support team at [Discord.gg/HomiesHouse](https://discord.gg/HomiesHouse).
 

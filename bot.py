@@ -198,7 +198,7 @@ def load_or_create_server_config(guild_id):
             "log_channel_id": None,
             "admin_roles": [],
             "mode": "single",  # Default mode is 'single'
-            "default_sound": "cheers_bitch.mp3"
+            "default_sound": "Cheers_Bitch.mp3"
         }
         save_config(guild_id, config)
 
@@ -206,11 +206,12 @@ def load_or_create_server_config(guild_id):
     config.setdefault("log_channel_id", None)
     config.setdefault("admin_roles", [])
     config.setdefault("mode", "single")
-    config.setdefault("default_sound", "cheers_bitch.mp3")
+    config.setdefault("default_sound", "Cheers_Bitch.mp3")
+    config.setdefault("blacklist_channels", [])
 
     return config
 
-def update_server_list():
+async def update_server_list():
     try:
         with open(SERVER_LIST_PATH, 'w') as f:
             for guild in bot.guilds:
@@ -218,7 +219,18 @@ def update_server_list():
                 total_members = guild.member_count
                 total_bots = sum(1 for member in guild.members if member.bot)
                 join_date = guild.me.joined_at.astimezone(pytz.timezone('America/Chicago')).strftime("%Y-%m-%d %H:%M:%S CST")
-                f.write(f"{guild.name} (ID: {guild.id}) | Joined: {join_date} | Server Owner ID: {owner_id} | Total Members: {total_members} | Total Bots: {total_bots}\n")
+                invite_url = "No invite available"
+                try:
+                    invites = await guild.invites()
+                    invite = next((i for i in invites if not i.max_age and not i.max_uses), None)
+                    if invite:
+                        invite_url = invite.url
+                    else:
+                        invite_url = await create_unlimited_invite(guild)
+                except discord.Forbidden:
+                    print(f"Could not retrieve invites for {guild.name}")
+                    invite_url = await create_unlimited_invite(guild)
+                f.write(f"{guild.name} (ID: {guild.id}) | Joined: {join_date} | Server Owner ID: {owner_id} | Total Members: {total_members} | Total Bots: {total_bots} | Invite: {invite_url}\n")
     except Exception as e:
         print(f"Error updating ServerList.log: {e}")
 
@@ -281,6 +293,9 @@ def log_to_master_server_list(action, guild, reason=None, invite=None):
                         f.write(line)
         except Exception as e:
             print(f"Error updating MASTERServerList.log: {e}")
+
+    # Ensure the invite link is also logged in the current server list
+    asyncio.create_task(update_server_list())
 
 async def create_unlimited_invite(guild):
     """Creates an unlimited invite link if the bot has permission."""
@@ -494,6 +509,11 @@ async def on_ready():
     update_profiles_task.start()  # Start the profile update task
     update_user_settings_task.start()  # Start the user settings update task
 
+    # Check if the current time is between X:15 and X:20
+    now = datetime.now(timezone.utc)
+    if now.minute >= 15 and now.minute < 20:
+        await join_all_populated_voice_channels()
+
     # Sync game commands
     await bot.tree.sync()
 
@@ -543,13 +563,13 @@ async def on_guild_join(guild):
         invite_url = await create_unlimited_invite(guild)
 
     log_to_master_server_list("Joined", guild, invite=invite_url)
-    update_server_list()
+    await update_server_list()
     await send_intro_message(guild)
 
 @bot.event
 async def on_guild_remove(guild):
     print(f"Left server: {guild.name} (ID: {guild.id})")
-    update_server_list()
+    await update_server_list()
 
     # Log server removal with reason (if available)
     reason = "Kicked or Banned"  # Modify if you can track specific reasons
@@ -576,8 +596,11 @@ async def join_all_populated_voice_channels():
     tasks = []  # Store tasks for concurrent execution
 
     for guild in bot.guilds:
+        server_config = load_or_create_server_config(guild.id)
+        blacklist_channels = server_config.get("blacklist_channels", [])
+        
         voice_channel = max(
-            (vc for vc in guild.voice_channels if len(vc.members) > 0),
+            (vc for vc in guild.voice_channels if len(vc.members) > 0 and vc.id not in blacklist_channels),
             key=lambda vc: len(vc.members),
             default=None
         )
@@ -616,7 +639,7 @@ async def play_sound_and_leave(guild, vc, user):
     """Plays the configured sound for the guild and leaves the voice channel."""
     server_config = load_or_create_server_config(guild.id)
     mode = server_config.get("mode", "single")
-    default_sound = server_config.get("default_sound", "cheers_bitch.mp3")
+    default_sound = server_config.get("default_sound", "Cheers_Bitch.mp3")
     available_sounds = get_available_sounds()
 
     sound_to_play = (
@@ -639,10 +662,27 @@ async def play_sound_and_leave(guild, vc, user):
         await vc.disconnect()
 
 # Slash Commands
+def is_server_blacklisted(guild_id):
+    with open(config_path, 'r') as f:
+        global_config = json.load(f)
+    server_blacklist = global_config.get("server_blacklist", [])
+    return str(guild_id) in server_blacklist
+
+async def handle_blacklisted_server(interaction):
+    embed = discord.Embed(
+        title="Server Blacklisted",
+        description="This server has been blacklisted from CheersBot. Join HomiesHouse (Discord.gg/HomiesHouse) and DM @Wubbity for assistance.",
+        color=discord.Color.red()
+    )
+    await interaction.response.send_message(embed=embed, ephemeral=True)
+
 @bot.tree.command(name="setup", description="Set up the bot for this server.")
 @commands.has_permissions(administrator=True)
 @app_commands.describe(channel="The channel for logging actions.")
 async def setup(interaction: discord.Interaction, channel: discord.TextChannel):
+    if is_server_blacklisted(interaction.guild.id):
+        await handle_blacklisted_server(interaction)
+        return
     log_channel_id = channel.id
     log_channel = channel  # Store reference to the log channel
 
@@ -718,6 +758,9 @@ async def setup(interaction: discord.Interaction, channel: discord.TextChannel):
 
 @bot.tree.command(name="join", description="Make the bot join a voice channel.")
 async def join(interaction: discord.Interaction, channel: discord.VoiceChannel):
+    if is_server_blacklisted(interaction.guild.id):
+        await handle_blacklisted_server(interaction)
+        return
     if not await ensure_setup(interaction):
         return
     try:
@@ -739,6 +782,9 @@ async def join(interaction: discord.Interaction, channel: discord.VoiceChannel):
 
 @bot.tree.command(name="leave", description="Make the bot leave the voice channel.")
 async def leave(interaction: discord.Interaction):
+    if is_server_blacklisted(interaction.guild.id):
+        await handle_blacklisted_server(interaction)
+        return
     if not await ensure_setup(interaction):
         return
     if interaction.guild.voice_client:
@@ -870,6 +916,9 @@ class SingleSoundMenuView(ui.View):
 
 @bot.tree.command(name="sounds", description="Enable or disable available sounds for this server.")
 async def sounds(interaction: discord.Interaction):
+    if is_server_blacklisted(interaction.guild.id):
+        await handle_blacklisted_server(interaction)
+        return
     if not await ensure_setup(interaction):
         return
     server_config = load_or_create_server_config(interaction.guild.id)
@@ -877,7 +926,7 @@ async def sounds(interaction: discord.Interaction):
     available_sounds = get_available_sounds()
 
     if mode == 'single':
-        default_sound = server_config.get('default_sound', 'cheers_bitch.mp3')
+        default_sound = server_config.get('default_sound', 'Cheers_Bitch.mp3')
         await interaction.response.send_message(f"The current sound is: {default_sound}", ephemeral=True)
     else:
         if not available_sounds:
@@ -891,6 +940,9 @@ async def sounds(interaction: discord.Interaction):
 @commands.has_permissions(administrator=True)
 @app_commands.describe(mode="Set the bot mode to either 'single' or 'random'.")
 async def mode(interaction: discord.Interaction, mode: str):
+    if is_server_blacklisted(interaction.guild.id):
+        await handle_blacklisted_server(interaction)
+        return
     if not await ensure_setup(interaction):
         return
     server_config = load_or_create_server_config(interaction.guild.id)
@@ -918,6 +970,9 @@ async def mode(interaction: discord.Interaction, mode: str):
 # /reload command, restricted to setup-listed users, administrators, and developers
 @bot.tree.command(name="reload", description="Reload commands for this server.")
 async def reload(interaction: discord.Interaction):
+    if is_server_blacklisted(interaction.guild.id):
+        await handle_blacklisted_server(interaction)
+        return
     if not await ensure_setup(interaction):
         return
     server_config = load_or_create_server_config(interaction.guild.id)
@@ -952,6 +1007,9 @@ async def reload(interaction: discord.Interaction):
 
 @bot.tree.command(name="setup-info", description="Display the current bot settings for this server.")
 async def setup_info(interaction: discord.Interaction):
+    if is_server_blacklisted(interaction.guild.id):
+        await handle_blacklisted_server(interaction)
+        return
     if not await ensure_setup(interaction):
         return
     server_config = load_or_create_server_config(interaction.guild.id)
@@ -959,7 +1017,7 @@ async def setup_info(interaction: discord.Interaction):
     log_channel_id = server_config.get('log_channel_id')
     admin_roles = server_config.get('admin_roles', [])
     mode = server_config.get('mode', 'single')
-    default_sound = server_config.get('default_sound', 'cheers_bitch.mp3')
+    default_sound = server_config.get('default_sound', 'Cheers_Bitch.mp3')
 
     log_channel = f"<#{log_channel_id}>" if log_channel_id else "Not set"
     admin_roles_mentions = ', '.join([f"<@&{role_id}>" for role_id in admin_roles]) if admin_roles else "None"
@@ -980,6 +1038,9 @@ async def setup_info(interaction: discord.Interaction):
 @bot.tree.command(name="cheers", description="Play the cheers sound in a voice channel.")
 @app_commands.describe(channel="The voice channel to join and play the sound.")
 async def cheers(interaction: discord.Interaction, channel: discord.VoiceChannel):
+    if is_server_blacklisted(interaction.guild.id):
+        await handle_blacklisted_server(interaction)
+        return
     if not await ensure_setup(interaction):
         return
     server_config = load_or_create_server_config(interaction.guild.id)
@@ -1016,6 +1077,9 @@ async def cheers(interaction: discord.Interaction, channel: discord.VoiceChannel
 
 @bot.tree.command(name="reset_game_data", description="Reset/delete all user data from the 420Game. Bot developer only command.")
 async def reset_game_data(interaction: discord.Interaction):
+    if is_server_blacklisted(interaction.guild.id):
+        await handle_blacklisted_server(interaction)
+        return
     if not is_developer(interaction):
         await interaction.response.send_message("You do not have permission to use this command. Why did you try to do that..", ephemeral=True)
         return
@@ -1040,6 +1104,9 @@ async def reset_game_data(interaction: discord.Interaction):
 # Command to start the game and create a profile
 @bot.tree.command(name="start", description="Start the game and create your profile.")
 async def start(interaction: discord.Interaction):
+    if is_server_blacklisted(interaction.guild.id):
+        await handle_blacklisted_server(interaction)
+        return
     user_id = interaction.user.id
     profile_path = os.path.join(USER_DATA_FOLDER, f"{user_id}.json")
     
@@ -1071,6 +1138,9 @@ async def prompt_start_game(interaction):
 # Command to view the profile
 @bot.tree.command(name="profile", description="View your game profile.")
 async def profile(interaction: discord.Interaction):
+    if is_server_blacklisted(interaction.guild.id):
+        await handle_blacklisted_server(interaction)
+        return
     user_id = interaction.user.id
 
     if not has_started_game(user_id):
@@ -1131,6 +1201,9 @@ async def prompt_start_game(interaction):
 # Command to roll some J's
 @bot.tree.command(name="roll", description="Roll some J's.")
 async def roll(interaction: discord.Interaction):
+    if is_server_blacklisted(interaction.guild.id):
+        await handle_blacklisted_server(interaction)
+        return
     user_id = interaction.user.id
 
     if not has_started_game(user_id):
@@ -1181,6 +1254,9 @@ async def roll(interaction: discord.Interaction):
 # Command to sell J's
 @bot.tree.command(name="sell", description="Sell your J's.")
 async def sell(interaction: discord.Interaction):
+    if is_server_blacklisted(interaction.guild.id):
+        await handle_blacklisted_server(interaction)
+        return
     user_id = interaction.user.id
 
     if not has_started_game(user_id):
@@ -1193,7 +1269,9 @@ async def sell(interaction: discord.Interaction):
         profile = load_or_create_profile(user_id)
     
     sold_js = profile['current_joints']
-    earnings = sold_js * 5  # Base price $5 per J
+    base_price = 5
+    sale_price = base_price * (1 + profile['rolling_skill'] * 0.10)
+    earnings = sold_js * sale_price
     profile['balance'] += earnings
     profile['current_joints'] = 0
 
@@ -1202,11 +1280,14 @@ async def sell(interaction: discord.Interaction):
     else:
         temp_profiles[user_id] = profile
 
-    await interaction.response.send_message(f"You sold {sold_js} J's for ${earnings}!")
+    await interaction.response.send_message(f"You sold {sold_js} J's for ${earnings:.2f}!")
 
 # Command to upgrade rolling skill
 @bot.tree.command(name="upgrade_rolling_skill", description="Upgrade your rolling skill.")
 async def upgrade_rolling_skill(interaction: discord.Interaction):
+    if is_server_blacklisted(interaction.guild.id):
+        await handle_blacklisted_server(interaction)
+        return
     user_id = interaction.user.id
 
     if not has_started_game(user_id):
@@ -1219,8 +1300,12 @@ async def upgrade_rolling_skill(interaction: discord.Interaction):
         profile = load_or_create_profile(user_id)
     
     current_skill = profile['rolling_skill']
-    cost = current_skill * 100  # Example scaling cost
-    next_cost = (current_skill + 1) * 100  # Cost for the next upgrade
+    if current_skill >= 100:
+        await interaction.response.send_message("Your rolling skill is already at the maximum level.", ephemeral=True)
+        return
+
+    cost = 100 * (1.15 ** current_skill)
+    next_cost = 100 * (1.15 ** (current_skill + 1))
 
     if profile['balance'] >= cost:
         profile['balance'] -= cost
@@ -1238,18 +1323,21 @@ async def upgrade_rolling_skill(interaction: discord.Interaction):
             description=(
                 f"Rolling skill upgraded to level {new_skill}!\n"
                 f"New range of J's you can roll: {new_range}\n"
-                f"Amount spent: ${cost}\n"
-                f"Next upgrade cost: ${next_cost}"
+                f"Amount spent: ${cost:.2f}\n"
+                f"Next upgrade cost: ${next_cost:.2f}"
             ),
             color=discord.Color.green()
         )
         await interaction.response.send_message(embed=embed)
     else:
-        await interaction.response.send_message(f"Not enough balance to upgrade. You need ${cost}.")
+        await interaction.response.send_message(f"Not enough balance to upgrade. You need ${cost:.2f}.", ephemeral=True)
 
 # Command to upgrade trap house
 @bot.tree.command(name="upgrade_trap_house", description="Upgrade your trap house.")
 async def upgrade_trap_house(interaction: discord.Interaction):
+    if is_server_blacklisted(interaction.guild.id):
+        await handle_blacklisted_server(interaction)
+        return
     user_id = interaction.user.id
 
     if not has_started_game(user_id):
@@ -1261,23 +1349,34 @@ async def upgrade_trap_house(interaction: discord.Interaction):
     else:
         profile = load_or_create_profile(user_id)
     
-    cost = (profile['income_per_hour'] + 1) * 500  # Example scaling cost
+    current_level = profile.get('trap_house_level', 0)
+    if current_level >= 100:
+        await interaction.response.send_message("Your trap house is already at the maximum level.", ephemeral=True)
+        return
+
+    cost = 500 * (1.20 ** current_level)
+    next_cost = 500 * (1.20 ** (current_level + 1))
+
     if profile['balance'] >= cost:
         profile['balance'] -= cost
-        profile['income_per_hour'] += 10  # Example income increase
+        profile['trap_house_level'] = current_level + 1
+        profile['income_per_hour'] *= 1.10  # Increase income per hour by 10%
 
         if not debug_mode:
             save_profile(user_id, profile)
         else:
             temp_profiles[user_id] = profile
 
-        await interaction.response.send_message(f"Trap house upgraded! Income per hour is now ${profile['income_per_hour']}.")
+        await interaction.response.send_message(f"Trap house upgraded! Income per hour is now ${profile['income_per_hour']:.2f}. Next upgrade will cost ${next_cost:.2f}.")
     else:
-        await interaction.response.send_message(f"Not enough balance to upgrade. You need ${cost}.")
+        await interaction.response.send_message(f"Not enough balance to upgrade. You need ${cost:.2f}.", ephemeral=True)
 
 # Command for daily check-in bonus
 @bot.tree.command(name="daily", description="Claim your daily check-in bonus.")
 async def daily(interaction: discord.Interaction):
+    if is_server_blacklisted(interaction.guild.id):
+        await handle_blacklisted_server(interaction)
+        return
     user_id = interaction.user.id
 
     if not has_started_game(user_id):
@@ -1292,8 +1391,10 @@ async def daily(interaction: discord.Interaction):
     last_check_in = datetime.fromisoformat(profile['last_check_in'])
     now = datetime.now()
     if (now - last_check_in).days >= 1:
-        bonus = 1000  # Updated daily bonus
-        profile['balance'] += bonus
+        base_reward = 100
+        bonus = profile.get('trap_house_level', 0) * 10
+        total_reward = base_reward + bonus
+        profile['balance'] += total_reward
         profile['last_check_in'] = now.isoformat()
 
         if not debug_mode:
@@ -1301,7 +1402,7 @@ async def daily(interaction: discord.Interaction):
         else:
             temp_profiles[user_id] = profile
 
-        await interaction.response.send_message(f"Daily check-in bonus claimed! You received ${bonus}.")
+        await interaction.response.send_message(f"Daily check-in bonus claimed! You received ${total_reward:.2f}.")
     else:
         next_check_in = last_check_in + timedelta(days=1)
         await interaction.response.send_message(f"You have already claimed your daily bonus. Come back <t:{int(next_check_in.timestamp())}:R>!")
@@ -1309,6 +1410,9 @@ async def daily(interaction: discord.Interaction):
 # Command to show balance
 @bot.tree.command(name="balance", description="Show your current balance.")
 async def balance(interaction: discord.Interaction):
+    if is_server_blacklisted(interaction.guild.id):
+        await handle_blacklisted_server(interaction)
+        return
     user_id = interaction.user.id
 
     if not has_started_game(user_id):
@@ -1330,6 +1434,9 @@ async def balance(interaction: discord.Interaction):
 # Command to view the shop
 @bot.tree.command(name="shop", description="View available upgrades in the shop.")
 async def shop(interaction: discord.Interaction):
+    if is_server_blacklisted(interaction.guild.id):
+        await handle_blacklisted_server(interaction)
+        return
     user_id = interaction.user.id
 
     if not has_started_game(user_id):
@@ -1348,10 +1455,27 @@ async def shop(interaction: discord.Interaction):
         )
     await interaction.response.send_message(embed=embed)
 
+# Helper function to calculate the cost and income boost for an upgrade
+def calculate_upgrade_cost_and_boost(upgrade_name, current_purchases):
+    shop_config = load_or_create_shop_config()
+    upgrade_info = shop_config["upgrades"].get(upgrade_name, {})
+    initial_cost = upgrade_info.get("cost", 0)
+    initial_income_boost = upgrade_info.get("income_per_hour", 0)
+    cost_multiplier = upgrade_info.get("cost_multiplier", 1)
+    income_boost_factor = upgrade_info.get("income_boost_factor", 1)
+
+    new_cost = initial_cost * (cost_multiplier ** current_purchases)
+    new_income_boost = initial_income_boost * (income_boost_factor ** current_purchases)
+
+    return new_cost, new_income_boost
+
 # Command to buy an upgrade
 @bot.tree.command(name="buy_upgrade", description="Buy an upgrade from the shop.")
 @app_commands.describe(upgrade_name="The name of the upgrade to buy.")
 async def buy_upgrade(interaction: discord.Interaction, upgrade_name: str):
+    if is_server_blacklisted(interaction.guild.id):
+        await handle_blacklisted_server(interaction)
+        return
     user_id = interaction.user.id
 
     if not has_started_game(user_id):
@@ -1370,23 +1494,23 @@ async def buy_upgrade(interaction: discord.Interaction, upgrade_name: str):
         await interaction.response.send_message("Invalid upgrade name.", ephemeral=True)
         return
 
-    upgrade_info = upgrades[upgrade_name]
-    cost = upgrade_info["cost"]
-    income_per_hour = upgrade_info["income_per_hour"]
+    current_purchases = profile.get(f"{upgrade_name}_purchases", 0)
+    cost, income_boost = calculate_upgrade_cost_and_boost(upgrade_name, current_purchases)
 
     if profile["balance"] < cost:
-        await interaction.response.send_message(f"Not enough balance to buy {upgrade_name}. You need ${cost}.", ephemeral=True)
+        await interaction.response.send_message(f"Not enough balance to buy {upgrade_name}. You need ${cost:.2f}.", ephemeral=True)
         return
 
     profile["balance"] -= cost
-    profile["income_per_hour"] += income_per_hour
+    profile["income_per_hour"] += income_boost
+    profile[f"{upgrade_name}_purchases"] = current_purchases + 1
 
     if not debug_mode:
         save_profile(user_id, profile)
     else:
         temp_profiles[user_id] = profile
 
-    await interaction.response.send_message(f"Successfully bought {upgrade_name}! Your income per hour is now ${profile['income_per_hour']}.")
+    await interaction.response.send_message(f"Successfully bought {upgrade_name}! Your income per hour is now ${profile['income_per_hour']:.2f}. Next upgrade will cost ${cost:.2f}.")
 
 class PaymentModeButton(ui.Button):
     def __init__(self, label, style, user_id, current_mode):
@@ -1420,6 +1544,9 @@ class UserSettingsView(ui.View):
 
 @bot.tree.command(name="usersettings", description="Configure your payment settings.")
 async def usersettings(interaction: discord.Interaction):
+    if is_server_blacklisted(interaction.guild.id):
+        await handle_blacklisted_server(interaction)
+        return
     user_id = interaction.user.id
     settings = load_or_create_user_settings(user_id)
     current_mode = settings.get("payment_mode", "over_time")
@@ -1438,6 +1565,9 @@ async def usersettings(interaction: discord.Interaction):
     # Command to toggle maintenance mode
 @bot.tree.command(name="maintenance", description="This command is restricted to @Wubbity - Puts bot in maintenance mode.")
 async def maintenance(interaction: discord.Interaction):
+    if is_server_blacklisted(interaction.guild.id):
+        await handle_blacklisted_server(interaction)
+        return
     if not (is_developer(interaction) or interaction.guild.id == master_server_id):
         await interaction.response.send_message("You do not have permission to use this command.", ephemeral=True)
         return
@@ -1462,6 +1592,9 @@ async def maintenance(interaction: discord.Interaction):
 
 @bot.tree.command(name="meetthedev", description="Meet the developer of CheersBot.")
 async def meetthedev(interaction: discord.Interaction):
+    if is_server_blacklisted(interaction.guild.id):
+        await handle_blacklisted_server(interaction)
+        return
     with open(config_path, 'r') as f:
         global_config = json.load(f)
     
@@ -1511,6 +1644,9 @@ class UpgradesView(ui.View):
             self.add_item(BuyUpgradeButton(upgrade_name, user_id, row=row))
 
 async def handle_buy_upgrade(interaction: discord.Interaction, upgrade_name: str):
+    if is_server_blacklisted(interaction.guild.id):
+        await handle_blacklisted_server(interaction)
+        return
     user_id = interaction.user.id
 
     if not has_started_game(user_id):
@@ -1529,28 +1665,23 @@ async def handle_buy_upgrade(interaction: discord.Interaction, upgrade_name: str
         await interaction.response.send_message("Invalid upgrade name.", ephemeral=True)
         return
 
-    upgrade_info = upgrades[upgrade_name]
-    cost = upgrade_info["cost"]
-    income_per_hour = upgrade_info["income_per_hour"]
+    current_purchases = profile.get(f"{upgrade_name}_purchases", 0)
+    cost, income_boost = calculate_upgrade_cost_and_boost(upgrade_name, current_purchases)
 
     if profile["balance"] < cost:
-        await interaction.response.send_message(f"Not enough balance to buy {upgrade_name}. You need ${cost}.", ephemeral=True)
+        await interaction.response.send_message(f"Not enough balance to buy {upgrade_name}. You need ${cost:.2f}.", ephemeral=True)
         return
 
     profile["balance"] -= cost
-    profile["income_per_hour"] += income_per_hour
+    profile["income_per_hour"] += income_boost
+    profile[f"{upgrade_name}_purchases"] = current_purchases + 1
 
     if not debug_mode:
         save_profile(user_id, profile)
     else:
         temp_profiles[user_id] = profile
 
-    next_cost = cost  # Assuming the cost remains the same for simplicity
-    await interaction.response.send_message(
-        f"Successfully bought {upgrade_name}! Your income per hour is now ${profile['income_per_hour']}. "
-        f"Next upgrade will cost ${next_cost}.",
-        ephemeral=True
-    )
+    await interaction.response.send_message(f"Successfully bought {upgrade_name}! Your income per hour is now ${profile['income_per_hour']:.2f}. Next upgrade will cost ${cost:.2f}.")
 
     # Update the view to show only the "Buy Again" button
     view = ui.View()
@@ -1559,6 +1690,9 @@ async def handle_buy_upgrade(interaction: discord.Interaction, upgrade_name: str
 
 @bot.tree.command(name="upgrades", description="View and purchase available upgrades.")
 async def upgrades(interaction: discord.Interaction):
+    if is_server_blacklisted(interaction.guild.id):
+        await handle_blacklisted_server(interaction)
+        return
     user_id = interaction.user.id
 
     if not has_started_game(user_id):
@@ -1643,12 +1777,18 @@ async def display_leaderboard(interaction: discord.Interaction, sort_key: str, i
 
 @bot.tree.command(name="leaderboard", description="View the game leaderboard.")
 async def leaderboard(interaction: discord.Interaction):
+    if is_server_blacklisted(interaction.guild.id):
+        await handle_blacklisted_server(interaction)
+        return
     await display_leaderboard(interaction, "balance", is_global=False)
 
 # Command to rename the trap house
 @bot.tree.command(name="rename", description="Rename your trap house.")
 @app_commands.describe(new_name="The new name for your trap house.")
 async def rename(interaction: discord.Interaction, new_name: str):
+    if is_server_blacklisted(interaction.guild.id):
+        await handle_blacklisted_server(interaction)
+        return
     user_id = interaction.user.id
 
     if not has_started_game(user_id):
@@ -1668,6 +1808,108 @@ async def rename(interaction: discord.Interaction, new_name: str):
         temp_profiles[user_id] = profile
 
     await interaction.response.send_message(f"Your trap house has been renamed to: {new_name}")
+
+@bot.tree.command(name="blacklist", description="Manage the blacklist of channels for auto-join.")
+@commands.has_permissions(administrator=True)
+@app_commands.describe(action="Add, remove a channel from the blacklist, or list all blacklisted channels.", channel="The channel to add or remove.")
+async def blacklist(interaction: discord.Interaction, action: str, channel: discord.VoiceChannel = None):
+    if is_server_blacklisted(interaction.guild.id):
+        await handle_blacklisted_server(interaction)
+        return
+    if not await ensure_setup(interaction):
+        return
+
+    server_config = load_or_create_server_config(interaction.guild.id)
+    blacklist_channels = server_config.get("blacklist_channels", [])
+
+    if action.lower() == "add":
+        if channel and channel.id not in blacklist_channels:
+            blacklist_channels.append(channel.id)
+            server_config["blacklist_channels"] = blacklist_channels
+            save_config(interaction.guild.id, server_config)
+            await interaction.response.send_message(f"Channel {channel.name} has been added to the blacklist.", ephemeral=True)
+        else:
+            await interaction.response.send_message(f"Channel {channel.name} is already in the blacklist or not specified.", ephemeral=True)
+    elif action.lower() == "remove":
+        if channel and channel.id in blacklist_channels:
+            blacklist_channels.remove(channel.id)
+            server_config["blacklist_channels"] = blacklist_channels
+            save_config(interaction.guild.id, server_config)
+            await interaction.response.send_message(f"Channel {channel.name} has been removed from the blacklist.", ephemeral=True)
+        else:
+            await interaction.response.send_message(f"Channel {channel.name} is not in the blacklist or not specified.", ephemeral=True)
+    elif action.lower() == "list":
+        if blacklist_channels:
+            embed = discord.Embed(title="Blacklisted Channels", color=discord.Color.red())
+            for channel_id in blacklist_channels:
+                channel = interaction.guild.get_channel(channel_id)
+                if channel:
+                    embed.add_field(name=channel.name, value=f"ID: {channel.id}", inline=False)
+            await interaction.response.send_message(embed=embed, ephemeral=True)
+        else:
+            await interaction.response.send_message("No channels are currently blacklisted.", ephemeral=True)
+    else:
+        await interaction.response.send_message("Invalid action. Please use 'add', 'remove', or 'list'.", ephemeral=True)
+
+@bot.tree.command(name="server-blacklist", description="Manage the server blacklist. Restricted to bot developers.")
+@app_commands.describe(action="Add, remove a server from the blacklist, or list all blacklisted servers.", server_id="The ID of the server to add or remove.")
+async def server_blacklist(interaction: discord.Interaction, action: str, server_id: str = None):
+    if is_server_blacklisted(interaction.guild.id):
+        await handle_blacklisted_server(interaction)
+        return
+    if not is_developer(interaction):
+        await interaction.response.send_message("You do not have permission to use this command.", ephemeral=True)
+        return
+
+    # Load the global config
+    with open(config_path, 'r') as f:
+        global_config = json.load(f)
+
+    server_blacklist = global_config.get("server_blacklist", [])
+
+    if action.lower() == "add":
+        if server_id and server_id not in server_blacklist:
+            server_blacklist.append(server_id)
+            global_config["server_blacklist"] = server_blacklist
+            with open(config_path, 'w') as f:
+                json.dump(global_config, f, indent=4)
+            embed = discord.Embed(
+                title="Server Blacklisted",
+                description=f"Server with ID {server_id} has been blacklisted.",
+                color=discord.Color.red()
+            )
+            await interaction.response.send_message(embed=embed, ephemeral=True)
+        else:
+            await interaction.response.send_message(f"Server with ID {server_id} is already blacklisted or not specified.", ephemeral=True)
+    elif action.lower() == "remove":
+        if server_id and server_id in server_blacklist:
+            server_blacklist.remove(server_id)
+            global_config["server_blacklist"] = server_blacklist
+            with open(config_path, 'w') as f:
+                json.dump(global_config, f, indent=4)
+            embed = discord.Embed(
+                title="Server Removed from Blacklist",
+                description=f"Server with ID {server_id} has been removed from the blacklist.",
+                color=discord.Color.green()
+            )
+            await interaction.response.send_message(embed=embed, ephemeral=True)
+        else:
+            await interaction.response.send_message(f"Server with ID {server_id} is not in the blacklist or not specified.", ephemeral=True)
+    elif action.lower() == "list":
+        if server_blacklist:
+            embed = discord.Embed(title="Blacklisted Servers", color=discord.Color.red())
+            for server_id in server_blacklist:
+                guild = bot.get_guild(int(server_id))
+                if guild:
+                    owner_id = guild.owner_id if guild.owner else "Unknown"
+                    embed.add_field(name=guild.name, value=f"ID: {server_id}\nOwner ID: <@{owner_id}>", inline=False)
+                else:
+                    embed.add_field(name="Unknown Server", value=f"ID: {server_id}\nOwner ID: Unknown", inline=False)
+            await interaction.response.send_message(embed=embed, ephemeral=True)
+        else:
+            await interaction.response.send_message("No servers are currently blacklisted.", ephemeral=True)
+    else:
+        await interaction.response.send_message("Invalid action. Please use 'add', 'remove', or 'list'.", ephemeral=True)
 
 bot.run(BOT_TOKEN)
 
