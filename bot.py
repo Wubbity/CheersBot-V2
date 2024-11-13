@@ -228,7 +228,8 @@ async def update_server_list():
                     else:
                         invite_url = await create_unlimited_invite(guild)
                 except discord.Forbidden:
-                    print(f"Could not retrieve invites for {guild.name}")
+                    if debug_mode:
+                        print(f"Could not retrieve invites for {guild.name}")
                     invite_url = await create_unlimited_invite(guild)
                 f.write(f"{guild.name} (ID: {guild.id}) | Joined: {join_date} | Server Owner ID: {owner_id} | Total Members: {total_members} | Total Bots: {total_bots} | Invite: {invite_url}\n")
     except Exception as e:
@@ -390,6 +391,9 @@ intents.members = True
 intents.messages = True
 
 bot = commands.Bot(command_prefix="!", intents=intents)
+
+# Add a prefix for the text command "sync"
+bot.command_prefix = "."
 
 def is_developer(interaction: discord.Interaction) -> bool:
     with open(config_path, 'r') as f:
@@ -572,8 +576,14 @@ async def on_guild_remove(guild):
     await update_server_list()
 
     # Log server removal with reason (if available)
-    reason = "Kicked or Banned"  # Modify if you can track specific reasons
+    reason = "Left the server"  # General reason for leaving the server
     log_to_master_server_list("Left", guild, reason=reason)
+
+    # Delete the server configuration
+    config_file = get_config_filepath(guild.id)
+    if os.path.exists(config_file):
+        os.remove(config_file)
+        print(f"Deleted config for {guild.name} (ID: {guild.id})")
 
 # Auto-Join Task
 @tasks.loop(seconds=1)
@@ -1101,6 +1111,114 @@ async def reset_game_data(interaction: discord.Interaction):
     except Exception as e:
         await interaction.response.send_message(f"An error occurred while resetting game data: {e}", ephemeral=True)
 
+class ConfirmUpgradeButton(ui.Button):
+    def __init__(self, upgrade_name, user_id):
+        super().__init__(label=f"Confirm {upgrade_name}", style=ButtonStyle.green)
+        self.upgrade_name = upgrade_name
+        self.user_id = user_id
+
+    async def callback(self, interaction: Interaction):
+        await handle_buy_upgrade(interaction, self.upgrade_name)
+
+class DenyUpgradeButton(ui.Button):
+    def __init__(self):
+        super().__init__(label="Cancel", style=ButtonStyle.red)
+
+    async def callback(self, interaction: Interaction):
+        await interaction.response.send_message("Upgrade purchase canceled.", ephemeral=True)
+
+class ConfirmUpgradeView(ui.View):
+    def __init__(self, upgrade_name, user_id):
+        super().__init__(timeout=60)  # 1 minute timeout for interaction
+        self.add_item(ConfirmUpgradeButton(upgrade_name, user_id))
+        self.add_item(DenyUpgradeButton())
+
+def find_closest_upgrade(upgrade_name, upgrades):
+    upgrade_name = upgrade_name.lower()
+    closest_match = None
+    min_distance = float('inf')
+    for name in upgrades:
+        distance = sum(1 for a, b in zip(upgrade_name, name.lower()) if a != b) + abs(len(upgrade_name) - len(name))
+        if distance < min_distance:
+            min_distance = distance
+            closest_match = name
+    return closest_match
+
+async def handle_buy_upgrade(interaction: discord.Interaction, upgrade_name: str):
+    user_id = interaction.user.id
+
+    if not has_started_game(user_id):
+        await prompt_start_game(interaction)
+        return
+
+    if debug_mode:
+        profile = load_or_create_temp_profile(user_id)
+    else:
+        profile = load_or_create_profile(user_id)
+    
+    shop_config = load_or_create_shop_config()
+    upgrades = shop_config.get("upgrades", {})
+
+    if upgrade_name not in upgrades:
+        await interaction.response.send_message("Invalid upgrade name.", ephemeral=True)
+        return
+
+    current_purchases = profile.get(f"{upgrade_name}_purchases", 0)
+    cost, income_boost = calculate_upgrade_cost_and_boost(upgrade_name, current_purchases)
+
+    if profile["balance"] < cost:
+        await interaction.response.send_message(f"Not enough balance to buy {upgrade_name}. You need ${cost:.2f}.", ephemeral=True)
+        return
+
+    profile["balance"] -= cost
+    profile["income_per_hour"] += income_boost
+    profile[f"{upgrade_name}_purchases"] = current_purchases + 1
+
+    if not debug_mode:
+        save_profile(user_id, profile)
+    else:
+        temp_profiles[user_id] = profile
+
+    await interaction.response.send_message(f"Successfully bought {upgrade_name}! Your income per hour is now ${profile['income_per_hour']:.2f}. Next upgrade will cost ${cost:.2f}.")
+
+@bot.tree.command(name="buy_upgrade", description="Buy an upgrade from the shop.")
+@app_commands.describe(upgrade_name="The name of the upgrade to buy.")
+async def buy_upgrade(interaction: discord.Interaction, upgrade_name: str):
+    if is_server_blacklisted(interaction.guild.id):
+        await handle_blacklisted_server(interaction)
+        return
+    user_id = interaction.user.id
+
+    if not has_started_game(user_id):
+        await prompt_start_game(interaction)
+        return
+
+    if debug_mode:
+        profile = load_or_create_temp_profile(user_id)
+    else:
+        profile = load_or_create_profile(user_id)
+    
+    shop_config = load_or_create_shop_config()
+    upgrades = shop_config.get("upgrades", {})
+
+    if upgrade_name.lower() not in [name.lower() for name in upgrades]:
+        closest_match = find_closest_upgrade(upgrade_name, upgrades)
+        if closest_match:
+            view = ConfirmUpgradeView(closest_match, user_id)
+            await interaction.response.send_message(
+                f"Did you mean '{closest_match}'? Please confirm or cancel the purchase.",
+                view=view,
+                ephemeral=True
+            )
+        else:
+            await interaction.response.send_message("Invalid upgrade name.", ephemeral=True)
+        return
+
+    # Ensure the upgrade name matches exactly
+    upgrade_name = next(name for name in upgrades if name.lower() == upgrade_name.lower())
+
+    await handle_buy_upgrade(interaction, upgrade_name)
+
 # Command to start the game and create a profile
 @bot.tree.command(name="start", description="Start the game and create your profile.")
 async def start(interaction: discord.Interaction):
@@ -1167,6 +1285,22 @@ async def profile(interaction: discord.Interaction):
     embed.add_field(name="Total Joints Rolled", value=profile['total_joints_rolled'], inline=False)
     embed.add_field(name="Trap House Age", value=f"{profile['trap_house_age']} days (Started: <t:{int(datetime.fromisoformat(profile['start_date']).timestamp())}:D>)", inline=False)
     await interaction.response.send_message(embed=embed)
+
+# Dictionary to store user cooldowns
+user_cooldowns = {}
+
+# Dictionary to store original profiles before maintenance mode
+original_profiles = {}
+
+# Dictionary to store temporary profiles during maintenance mode
+temp_profiles = {}
+
+class RollMoreButton(ui.Button):
+    def __init__(self):
+        super().__init__(label="Roll more", style=ButtonStyle.green)
+
+    async def callback(self, interaction: Interaction):
+        await roll.callback(interaction)  # Use the callback method of the command
 
 # Dictionary to store user cooldowns
 user_cooldowns = {}
@@ -1469,48 +1603,16 @@ def calculate_upgrade_cost_and_boost(upgrade_name, current_purchases):
 
     return new_cost, new_income_boost
 
-# Command to buy an upgrade
-@bot.tree.command(name="buy_upgrade", description="Buy an upgrade from the shop.")
-@app_commands.describe(upgrade_name="The name of the upgrade to buy.")
-async def buy_upgrade(interaction: discord.Interaction, upgrade_name: str):
-    if is_server_blacklisted(interaction.guild.id):
-        await handle_blacklisted_server(interaction)
-        return
-    user_id = interaction.user.id
-
-    if not has_started_game(user_id):
-        await prompt_start_game(interaction)
-        return
-
-    if debug_mode:
-        profile = load_or_create_temp_profile(user_id)
-    else:
-        profile = load_or_create_profile(user_id)
-    
-    shop_config = load_or_create_shop_config()
-    upgrades = shop_config.get("upgrades", {})
-
-    if upgrade_name not in upgrades:
-        await interaction.response.send_message("Invalid upgrade name.", ephemeral=True)
-        return
-
-    current_purchases = profile.get(f"{upgrade_name}_purchases", 0)
-    cost, income_boost = calculate_upgrade_cost_and_boost(upgrade_name, current_purchases)
-
-    if profile["balance"] < cost:
-        await interaction.response.send_message(f"Not enough balance to buy {upgrade_name}. You need ${cost:.2f}.", ephemeral=True)
-        return
-
-    profile["balance"] -= cost
-    profile["income_per_hour"] += income_boost
-    profile[f"{upgrade_name}_purchases"] = current_purchases + 1
-
-    if not debug_mode:
-        save_profile(user_id, profile)
-    else:
-        temp_profiles[user_id] = profile
-
-    await interaction.response.send_message(f"Successfully bought {upgrade_name}! Your income per hour is now ${profile['income_per_hour']:.2f}. Next upgrade will cost ${cost:.2f}.")
+def find_closest_upgrade(upgrade_name, upgrades):
+    upgrade_name = upgrade_name.lower()
+    closest_match = None
+    min_distance = float('inf')
+    for name in upgrades:
+        distance = sum(1 for a, b in zip(upgrade_name, name.lower()) if a != b) + abs(len(upgrade_name) - len(name))
+        if distance < min_distance:
+            min_distance = distance
+            closest_match = name
+    return closest_match
 
 class PaymentModeButton(ui.Button):
     def __init__(self, label, style, user_id, current_mode):
@@ -1910,6 +2012,39 @@ async def server_blacklist(interaction: discord.Interaction, action: str, server
             await interaction.response.send_message("No servers are currently blacklisted.", ephemeral=True)
     else:
         await interaction.response.send_message("Invalid action. Please use 'add', 'remove', or 'list'.", ephemeral=True)
+
+@bot.command(name="sync")
+async def sync(ctx):
+    developer_ids = load_developer_ids()
+    if str(ctx.author.id) not in developer_ids:
+        await ctx.send("You do not have permission to use this command.")
+        return
+
+    try:
+        # Sync commands globally
+        print("Syncing...")
+        synced = await bot.tree.sync()
+        command_count = len(synced)
+
+        # Update server list and regenerate invite links
+        await update_server_list()
+
+        # Generate a summary of the sync operation
+        server_count = len(bot.guilds)
+        await ctx.send(f"Successfully synced {command_count} commands to {server_count} servers.")
+        print(f"Successfully synced {command_count} commands to {server_count} servers.")
+    except Exception as e:
+        await ctx.send(f"Failed to sync commands: {e}")
+        print(f"Failed to sync commands: {e}")
+
+    # Output "Syncing..." every 10 seconds until syncing is complete
+    while True:
+        print("Syncing...")
+        await asyncio.sleep(10)
+        if not bot.is_closed():
+            break
+
+    print("Syncing complete.")
 
 bot.run(BOT_TOKEN)
 
