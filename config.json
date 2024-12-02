@@ -11,5 +11,6 @@
     "debug": true,
     "master_server_id": "1191385756774703194",
     "discord_link": "https://discord.gg/HomiesHouse",
-    "website": "https://HomiesHouse.net"
+    "website": "https://HomiesHouse.net",
+    "BetaGameMessage": true
 }

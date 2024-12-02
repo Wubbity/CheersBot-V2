@@ -111,24 +111,24 @@ def load_or_create_temp_profile(user_id):
 # Helper function to load or create the shop config
 def load_or_create_shop_config():
     if os.path.exists(SHOP_CONFIG_PATH):
-        with open(SHOP_CONFIG_PATH, 'r') as f:
-            return json.load(f)
-    else:
-        shop_config = {
-            "upgrades": {
-                "Blunt Rolling Tutorial": {
-                    "cost": 100,
-                    "income_per_hour": 5
-                },
-                "Cone Filler": {
-                    "cost": 500,
-                    "income_per_hour": 25
-                }
+        try:
+            with open(SHOP_CONFIG_PATH, 'r') as f:
+                return json.load(f)
+        except json.JSONDecodeError:
+            pass  # If there's an error, fall back to creating a new config
+    shop_config = {
+        "upgrades": {
+            "Rolling Papers": {
+                "cost": 50,
+                "income_per_hour": 5,
+                "income_boost_factor": 0.90,
+                "cost_multiplier": 1.20
             }
         }
-        with open(SHOP_CONFIG_PATH, 'w') as f:
-            json.dump(shop_config, f, indent=4)
-        return shop_config
+    }
+    with open(SHOP_CONFIG_PATH, 'w') as f:
+        json.dump(shop_config, f, indent=4)
+    return shop_config
 
 # Helper function to load or create user settings
 def load_or_create_user_settings(user_id):
@@ -468,6 +468,44 @@ async def update_profiles_task():
             profile['balance'] += profile['income_per_hour']
             save_profile(user_id, profile)
 
+@bot.tree.command(name="inventory", description="View your purchased items and their total income per hour.")
+async def inventory(interaction: discord.Interaction):
+    if is_server_blacklisted(interaction.guild.id):
+        await handle_blacklisted_server(interaction)
+        return
+    user_id = interaction.user.id
+
+    if not has_started_game(user_id):
+        await prompt_start_game(interaction)
+        return
+
+    if debug_mode:
+        profile = load_or_create_temp_profile(user_id)
+    else:
+        profile = load_or_create_profile(user_id)
+    
+    shop_config = load_or_create_shop_config()
+    upgrades = shop_config.get("upgrades", {})
+
+    embed = discord.Embed(title=f"{interaction.user.name}'s Inventory", color=discord.Color.blue())
+    total_income_per_hour = 0
+
+    for upgrade_name, upgrade_info in upgrades.items():
+        purchases = profile.get(f"{upgrade_name}_purchases", 0)
+        if purchases > 0:
+            income_per_hour = upgrade_info["income_per_hour"]
+            income_boost_factor = upgrade_info["income_boost_factor"]
+            total_income = sum(income_per_hour * (income_boost_factor ** i) for i in range(purchases))
+            total_income_per_hour += total_income
+            embed.add_field(
+                name=f"{upgrade_name} x{purchases}",
+                value=f"Total Income per Hour: ${total_income:.2f}",
+                inline=False
+            )
+
+    embed.add_field(name="Total Income per Hour", value=f"${total_income_per_hour:.2f}", inline=False)
+    await interaction.response.send_message(embed=embed)
+
 # Task to update user settings at the top of the hour
 @tasks.loop(seconds=1)
 async def update_user_settings_task():
@@ -644,6 +682,20 @@ async def join_voice_channel(guild, voice_channel, user):
         )
     except Exception as e:
         print(f"Error joining {voice_channel.name} in {guild.name}: {e}")
+        # Send a message in the first available text channel and ping the administrative role
+        server_config = load_or_create_server_config(guild.id)
+        admin_roles = server_config.get('admin_roles', [])
+        if admin_roles:
+            admin_role_mentions = ' '.join([f"<@&{role_id}>" for role_id in admin_roles])
+            message = (
+                f"Hey! I tried to join the most populated voice channel {voice_channel.name} but didn't have permission to. "
+                f"If you want to disallow me from joining a specific voice channel, use the /blacklist command. "
+                f"Please make sure I have access to the voice channel so I can play a sound on the world's next 4:20! {admin_role_mentions}"
+            )
+            for text_channel in guild.text_channels:
+                if text_channel.permissions_for(guild.me).send_messages:
+                    await text_channel.send(message)
+                    break
 
 async def play_sound_and_leave(guild, vc, user):
     """Plays the configured sound for the guild and leaves the voice channel."""
@@ -1140,7 +1192,6 @@ def find_closest_upgrade(upgrade_name, upgrades):
     for name in upgrades:
         distance = sum(1 for a, b in zip(upgrade_name, name.lower()) if a != b) + abs(len(upgrade_name) - len(name))
         if distance < min_distance:
-            min_distance = distance
             closest_match = name
     return closest_match
 
@@ -1237,7 +1288,28 @@ async def start(interaction: discord.Interaction):
         os.makedirs(GAME_FOLDER)
     
     profile = load_or_create_profile(user_id)
-    await interaction.response.send_message(f"Welcome to the game! Your trap house name is {profile['trap_house_name']}.")
+    
+    # Create the welcome embed
+    welcome_embed = discord.Embed(
+        title="Welcome to the game!",
+        description=f"Your trap house name is {profile['trap_house_name']}.",
+        color=discord.Color.green()
+    )
+    
+    await interaction.response.send_message(embed=welcome_embed, ephemeral=True)
+    
+    # Check if the BetaGameMessage is enabled in the config
+    if global_config.get("BetaGameMessage", False):
+        beta_message_embed = discord.Embed(
+            title="Note",
+            description=(
+                "The 420Game is still under heavy development and the bot may restart many times due to the development. "
+                "The current state of 420Game does not reflect a finished product. If you have questions or ideas and would like to share them, "
+                "use the `/meetthedev` command to get in contact with Wubbity."
+            ),
+            color=discord.Color.orange()
+        )
+        await interaction.followup.send(embed=beta_message_embed, ephemeral=True)
 
 # Helper function to check if the user has started the game
 def has_started_game(user_id):
@@ -2045,6 +2117,26 @@ async def sync(ctx):
             break
 
     print("Syncing complete.")
+
+@bot.event
+async def on_command_error(ctx, error):
+    with open(config_path, 'r') as f:
+        global_config = json.load(f)
+    developer_ids = global_config.get("bot_developer_ids", [])
+    discord_link = global_config.get("discord_link", "https://discord.gg/HomiesHouse")
+    developer_mentions = ', '.join([f"<@{dev_id}>" for dev_id in developer_ids])
+
+    embed = discord.Embed(
+        title="Error",
+        description=f"An error occurred: {str(error)}",
+        color=discord.Color.red()
+    )
+    embed.add_field(
+        name="Need Help?",
+        value=f"If you are unsure what went wrong, please contact {developer_mentions} or join the Discord at {discord_link}.",
+        inline=False
+    )
+    await ctx.send(embed=embed)
 
 bot.run(BOT_TOKEN)
 
