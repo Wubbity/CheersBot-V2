@@ -724,11 +724,21 @@ async def play_sound_and_leave(guild, vc, user):
         await vc.disconnect()
 
 # Slash Commands
+BLACKLISTED_SERVERS_PATH = os.path.join(SERVER_LOG_DIR, "BlacklistedServers.json")
+
+def load_blacklisted_servers():
+    if os.path.exists(BLACKLISTED_SERVERS_PATH):
+        with open(BLACKLISTED_SERVERS_PATH, 'r') as f:
+            return json.load(f)
+    return []
+
+def save_blacklisted_servers(blacklisted_servers):
+    with open(BLACKLISTED_SERVERS_PATH, 'w') as f:
+        json.dump(blacklisted_servers, f, indent=4)
+
 def is_server_blacklisted(guild_id):
-    with open(config_path, 'r') as f:
-        global_config = json.load(f)
-    server_blacklist = global_config.get("server_blacklist", [])
-    return str(guild_id) in server_blacklist
+    blacklisted_servers = load_blacklisted_servers()
+    return any(server['id'] == str(guild_id) for server in blacklisted_servers)
 
 async def handle_blacklisted_server(interaction):
     embed = discord.Embed(
@@ -1030,40 +1040,17 @@ async def mode(interaction: discord.Interaction, mode: str):
         await interaction.response.send_message(f"The mode has been set to {mode.capitalize()} for this server.")
 
 # /reload command, restricted to setup-listed users, administrators, and developers
-@bot.tree.command(name="reload", description="Reload commands for this server.")
+@bot.tree.command(name="reload", description="Reload commands globally.")
 async def reload(interaction: discord.Interaction):
-    if is_server_blacklisted(interaction.guild.id):
-        await handle_blacklisted_server(interaction)
-        return
-    if not await ensure_setup(interaction):
-        return
-    server_config = load_or_create_server_config(interaction.guild.id)
-    admin_roles = server_config.get('admin_roles', [])
-
-    # Load bot developer IDs from config.json
-    with open(config_path, 'r') as f:
-        global_config = json.load(f)
-    developer_ids = global_config.get("bot_developer_ids", [])
-
-    # Check if the user has permission to reload commands
-    if not (
-        interaction.user.guild_permissions.administrator
-        or any(role.id in admin_roles for role in interaction.user.roles)
-        or str(interaction.user.id) in developer_ids
-    ):
-        await interaction.response.send_message(
-            "You do not have permission to use this command.", ephemeral=True
-        )
+    if not is_developer(interaction):
+        await interaction.response.send_message("You do not have permission to use this command.", ephemeral=True)
         return
 
-    # Acknowledge interaction early
     await interaction.response.defer(ephemeral=True)
     try:
-        # Reload commands for the current guild
-        await bot.tree.sync(guild=interaction.guild)
-        await interaction.followup.send(
-            f"Commands reloaded for {interaction.guild.name}.", ephemeral=True
-        )
+        # Reload commands globally
+        await bot.tree.sync()
+        await interaction.followup.send("Commands reloaded globally.", ephemeral=True)
     except Exception as e:
         await interaction.followup.send(f"Failed to reload commands: {e}", ephemeral=True)
 
@@ -2026,8 +2013,8 @@ async def blacklist(interaction: discord.Interaction, action: str, channel: disc
         await interaction.response.send_message("Invalid action. Please use 'add', 'remove', or 'list'.", ephemeral=True)
 
 @bot.tree.command(name="server-blacklist", description="Manage the server blacklist. Restricted to bot developers.")
-@app_commands.describe(action="Add, remove a server from the blacklist, or list all blacklisted servers.", server_id="The ID of the server to add or remove.")
-async def server_blacklist(interaction: discord.Interaction, action: str, server_id: str = None):
+@app_commands.describe(action="Add, remove a server from the blacklist, or list all blacklisted servers.", server_id="The ID of the server to add or remove.", reason="The reason for blacklisting the server.")
+async def server_blacklist(interaction: discord.Interaction, action: str, server_id: str = None, reason: str = None):
     if is_server_blacklisted(interaction.guild.id):
         await handle_blacklisted_server(interaction)
         return
@@ -2035,32 +2022,33 @@ async def server_blacklist(interaction: discord.Interaction, action: str, server
         await interaction.response.send_message("You do not have permission to use this command.", ephemeral=True)
         return
 
-    # Load the global config
-    with open(config_path, 'r') as f:
-        global_config = json.load(f)
-
-    server_blacklist = global_config.get("server_blacklist", [])
+    blacklisted_servers = load_blacklisted_servers()
 
     if action.lower() == "add":
-        if server_id and server_id not in server_blacklist:
-            server_blacklist.append(server_id)
-            global_config["server_blacklist"] = server_blacklist
-            with open(config_path, 'w') as f:
-                json.dump(global_config, f, indent=4)
-            embed = discord.Embed(
-                title="Server Blacklisted",
-                description=f"Server with ID {server_id} has been blacklisted.",
-                color=discord.Color.red()
-            )
-            await interaction.response.send_message(embed=embed, ephemeral=True)
+        if server_id and reason:
+            guild = bot.get_guild(int(server_id))
+            if guild and not any(server['id'] == server_id for server in blacklisted_servers):
+                blacklisted_servers.append({
+                    "id": server_id,
+                    "name": guild.name,
+                    "owner": str(guild.owner_id),
+                    "reason": reason
+                })
+                save_blacklisted_servers(blacklisted_servers)
+                embed = discord.Embed(
+                    title="Server Blacklisted",
+                    description=f"Server with ID {server_id} has been blacklisted for the following reason: {reason}",
+                    color=discord.Color.red()
+                )
+                await interaction.response.send_message(embed=embed, ephemeral=True)
+            else:
+                await interaction.response.send_message(f"Server with ID {server_id} is already blacklisted or not found.", ephemeral=True)
         else:
-            await interaction.response.send_message(f"Server with ID {server_id} is already blacklisted or not specified.", ephemeral=True)
+            await interaction.response.send_message("Server ID and reason are required to add a server to the blacklist.", ephemeral=True)
     elif action.lower() == "remove":
-        if server_id and server_id in server_blacklist:
-            server_blacklist.remove(server_id)
-            global_config["server_blacklist"] = server_blacklist
-            with open(config_path, 'w') as f:
-                json.dump(global_config, f, indent=4)
+        if server_id:
+            blacklisted_servers = [server for server in blacklisted_servers if server['id'] != server_id]
+            save_blacklisted_servers(blacklisted_servers)
             embed = discord.Embed(
                 title="Server Removed from Blacklist",
                 description=f"Server with ID {server_id} has been removed from the blacklist.",
@@ -2068,17 +2056,17 @@ async def server_blacklist(interaction: discord.Interaction, action: str, server
             )
             await interaction.response.send_message(embed=embed, ephemeral=True)
         else:
-            await interaction.response.send_message(f"Server with ID {server_id} is not in the blacklist or not specified.", ephemeral=True)
+            await interaction.response.send_message("Server ID is required to remove a server from the blacklist.", ephemeral=True)
     elif action.lower() == "list":
-        if server_blacklist:
+        if blacklisted_servers:
             embed = discord.Embed(title="Blacklisted Servers", color=discord.Color.red())
-            for server_id in server_blacklist:
-                guild = bot.get_guild(int(server_id))
+            for server in blacklisted_servers:
+                guild = bot.get_guild(int(server['id']))
                 if guild:
                     owner_id = guild.owner_id if guild.owner else "Unknown"
-                    embed.add_field(name=guild.name, value=f"ID: {server_id}\nOwner ID: <@{owner_id}>", inline=False)
+                    embed.add_field(name=guild.name, value=f"ID: {server['id']}\nOwner ID: <@{owner_id}>\nReason: {server['reason']}", inline=False)
                 else:
-                    embed.add_field(name="Unknown Server", value=f"ID: {server_id}\nOwner ID: Unknown", inline=False)
+                    embed.add_field(name="Unknown Server", value=f"ID: {server['id']}\nOwner ID: {server['owner']}\nReason: {server['reason']}", inline=False)
             await interaction.response.send_message(embed=embed, ephemeral=True)
         else:
             await interaction.response.send_message("No servers are currently blacklisted.", ephemeral=True)
@@ -2137,6 +2125,69 @@ async def on_command_error(ctx, error):
         inline=False
     )
     await ctx.send(embed=embed)
+
+@bot.tree.command(name="test", description="Manually trigger the join and play functions for all servers.")
+async def test(interaction: discord.Interaction):
+    if not is_developer(interaction):
+        await interaction.response.send_message("You do not have permission to use this command.", ephemeral=True)
+        return
+
+    await interaction.response.send_message("Starting test command. Joining all servers' most populated voice channels...", ephemeral=True)
+
+    success_list = []
+    failure_list = []
+    not_setup_list = []
+    empty_list = []
+
+    async def test_join_and_play(guild):
+        server_config = load_or_create_server_config(guild.id)
+        blacklist_channels = server_config.get("blacklist_channels", [])
+        
+        voice_channel = max(
+            (vc for vc in guild.voice_channels if len(vc.members) > 0 and vc.id not in blacklist_channels),
+            key=lambda vc: len(vc.members),
+            default=None
+        )
+        if voice_channel:
+            try:
+                vc = await voice_channel.connect(reconnect=True)
+                await log_action(
+                    guild, "Test Join Voice Channel",
+                    f"Joined **{voice_channel.name}** at {datetime.now(timezone.utc).strftime('%H:%M:%S')} UTC. (Test command by developer)",
+                    interaction.user
+                )
+                await asyncio.sleep(15)  # Wait 15 seconds before playing the sound
+                await play_sound_and_leave(guild, vc, interaction.user)
+                success_list.append(guild)
+            except Exception as e:
+                print(f"Error during test join in {voice_channel.name} on {guild.name}: {e}")
+                failure_list.append(guild)
+        else:
+            # Check if there are any voice channels that the bot can join
+            if any(vc.id not in blacklist_channels for vc in guild.voice_channels):
+                empty_list.append(guild)
+            else:
+                not_setup_list.append(guild)
+
+    tasks = [test_join_and_play(guild) for guild in bot.guilds]
+    await asyncio.gather(*tasks)
+
+    # Create the embed for logging results
+    master_guild_id = global_config.get("master_server_id")
+    log_guild = bot.get_guild(master_guild_id)
+    log_channel_id = load_or_create_server_config(master_guild_id).get("log_channel_id")
+    log_channel = bot.get_channel(log_channel_id) if log_channel_id else None
+
+    if log_channel:
+        embed = discord.Embed(title="Test Command Results", color=discord.Color.blue())
+        embed.add_field(name="Successful Joins", value="\n".join([f"{guild.name} (ID: {guild.id}) | Owner: {guild.owner}" for guild in success_list]) or "[None]", inline=False)
+        embed.add_field(name="Failed Joins", value="\n".join([f"{guild.name} (ID: {guild.id}) | Owner: {guild.owner}" for guild in failure_list]) or "[None]", inline=False)
+        embed.add_field(name="Not Setup", value="\n".join([f"{guild.name} (ID: {guild.id}) | Owner: {guild.owner}" for guild in not_setup_list]) or "[None]", inline=False)
+        embed.add_field(name="Empty", value="\n".join([f"{guild.name} (ID: {guild.id}) | Owner: {guild.owner}" for guild in empty_list]) or "[None]", inline=False)
+        embed.add_field(name="Total Servers", value=f"{len(bot.guilds)}", inline=False)
+        await log_channel.send(embed=embed)
+
+    await interaction.followup.send("Test command completed. Check logs for details.", ephemeral=True)
 
 bot.run(BOT_TOKEN)
 
