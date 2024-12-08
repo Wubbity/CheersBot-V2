@@ -456,18 +456,6 @@ async def log_current_time_task():
     if now.minute % 5 == 0 and now.second == 0:
         print(f"Current time is {now.strftime('%H:%M')}")
 
-# Task to update trap house age and passive income
-@tasks.loop(hours=1)
-async def update_profiles_task():
-    for filename in os.listdir(GAME_FOLDER):
-        if filename.endswith(".json"):
-            user_id = filename.split(".")[0]
-            profile = load_or_create_profile(user_id)
-            start_date = datetime.fromisoformat(profile.get('start_date', datetime.now().isoformat()))
-            profile['trap_house_age'] = (datetime.now() - start_date).days
-            profile['balance'] += profile['income_per_hour']
-            save_profile(user_id, profile)
-
 @bot.tree.command(name="inventory", description="View your purchased items and their total income per hour.")
 async def inventory(interaction: discord.Interaction):
     if is_server_blacklisted(interaction.guild.id):
@@ -554,7 +542,8 @@ async def on_ready():
     # Check if the current time is between X:15 and X:20
     now = datetime.now(timezone.utc)
     if now.minute >= 15 and now.minute < 20:
-        await join_all_populated_voice_channels()
+        for guild in bot.guilds:
+            await join_all_populated_voice_channels(guild)
 
     # Sync game commands
     await bot.tree.sync()
@@ -630,45 +619,56 @@ async def auto_join_task():
     now = datetime.now(timezone.utc)
     if debug_mode:
         print(f"Checking time: {now.strftime('%H:%M:%S')} UTC")  # Debug print to check current time
-    if now.minute == 15 and now.second == 0:  # Trigger exactly at X:15:00
-        if debug_mode:
-            print("Triggering join_all_populated_voice_channels")  # Debug print for join trigger
-        await join_all_populated_voice_channels()
-    elif now.minute == 20 and now.second == 0:  # Trigger exactly at X:20:00
-        if debug_mode:
-            print("Triggering play_sound_in_all_channels")  # Debug print for play sound trigger
-        await play_sound_in_all_channels()
-
-async def join_all_populated_voice_channels():
-    """Join the most populated voice channels in all guilds concurrently."""
-    tasks = []  # Store tasks for concurrent execution
 
     for guild in bot.guilds:
         server_config = load_or_create_server_config(guild.id)
-        blacklist_channels = server_config.get("blacklist_channels", [])
-        
-        voice_channel = max(
-            (vc for vc in guild.voice_channels if len(vc.members) > 0 and vc.id not in blacklist_channels),
-            key=lambda vc: len(vc.members),
-            default=None
-        )
-        if voice_channel:
-            print(f"Scheduling join for {voice_channel.name} in {guild.name}...")
-            tasks.append(join_voice_channel(guild, voice_channel, bot.user))  # Add join task
+        join_frequency = server_config.get('join_frequency', 'every_hour')
 
-    if tasks:
-        await asyncio.gather(*tasks)  # Run all join tasks concurrently
+        if join_frequency == 'every_hour':
+            if now.minute == 15 and now.second == 0:  # Trigger exactly at X:15:00
+                if debug_mode:
+                    print(f"Triggering join_all_populated_voice_channels for {guild.name}")  # Debug print for join trigger
+                await join_all_populated_voice_channels(guild)
+            elif now.minute == 20 and now.second == 0:  # Trigger exactly at X:20:00
+                if debug_mode:
+                    print(f"Triggering play_sound_in_all_channels for {guild.name}")  # Debug print for play sound trigger
+                await play_sound_in_all_channels(guild)
+        elif join_frequency == 'timezones':
+            join_timezones = server_config.get('join_timezones', [])
+            for tz in join_timezones:
+                tz_offset = int(tz.split()[1].replace('UTC', '').replace('{', '').replace('}', ''))
+                tz_now = datetime.now(timezone(timedelta(hours=tz_offset)))
+                if tz_now.minute == 15 and tz_now.second == 0:
+                    if debug_mode:
+                        print(f"Triggering join_all_populated_voice_channels for {guild.name} in timezone {tz}")  # Debug print for join trigger
+                    await join_all_populated_voice_channels(guild)
+                elif tz_now.minute == 20 and tz_now.second == 0:
+                    if debug_mode:
+                        print(f"Triggering play_sound_in_all_channels for {guild.name} in timezone {tz}")  # Debug print for play sound trigger
+                    await play_sound_in_all_channels(guild)
+        elif join_frequency == 'manual':
+            continue  # Skip auto-join for manual mode
 
-async def play_sound_in_all_channels():
-    """Play the configured sound in all voice channels where the bot is connected."""
-    tasks = []  # Store tasks for concurrent execution
+async def join_all_populated_voice_channels(guild):
+    """Join the most populated voice channels in the specified guild."""
+    server_config = load_or_create_server_config(guild.id)
+    blacklist_channels = server_config.get("blacklist_channels", [])
+    
+    voice_channel = max(
+        (vc for vc in guild.voice_channels if len(vc.members) > 0 and vc.id not in blacklist_channels),
+        key=lambda vc: len(vc.members),
+        default=None
+    )
+    if voice_channel:
+        print(f"Scheduling join for {voice_channel.name} in {guild.name}...")
+        await join_voice_channel(guild, voice_channel, bot.user)  # Join the voice channel
+    else:
+        print(f"No valid voice channels to join in {guild.name}. Skipping join action.")
 
-    for guild in bot.guilds:
-        if guild.voice_client and guild.voice_client.is_connected():
-            tasks.append(play_sound_and_leave(guild, guild.voice_client, bot.user))  # Add play sound task
-
-    if tasks:
-        await asyncio.gather(*tasks)  # Run all play sound tasks concurrently
+async def play_sound_in_all_channels(guild):
+    """Play the configured sound in all voice channels where the bot is connected in the specified guild."""
+    if guild.voice_client and guild.voice_client.is_connected():
+        await play_sound_and_leave(guild, guild.voice_client, bot.user)  # Play sound and leave the voice channel
 
 async def join_voice_channel(guild, voice_channel, user):
     """Join a specific voice channel in a guild and log the action."""
@@ -771,26 +771,32 @@ async def setup(interaction: discord.Interaction, channel: discord.TextChannel):
         # Ensure the message is from the correct user in the correct channel
         return msg.author == interaction.user and msg.channel == log_channel
 
+    server_config = load_or_create_server_config(interaction.guild.id)
+    previous_admin_roles = server_config.get('admin_roles', [])
 
     try:
         # Step 2: Ask for Admin Roles
-        await log_channel.send("Provide the role ID(s) for admin commands, separated by commas, or ping the roles.")
+        await log_channel.send("Provide the role ID(s) for admin commands, separated by commas, or ping the roles. Type 'same' to use the previous roles.")
         try:
             role_msg = await bot.wait_for('message', timeout=60.0, check=check_message)
-            role_ids = (
-                [role.id for role in role_msg.role_mentions]
-                or [int(r.strip()) for r in role_msg.content.split(",") if r.strip().isdigit()]
-            )
-            if not role_ids:
-                await log_channel.send("No valid role IDs provided. Setup canceled.")
-                return
-            await log_channel.send(f"Admin roles set to: {', '.join(map(str, role_ids))}")
+            if role_msg.content.strip().lower() == 'same' and previous_admin_roles:
+                role_ids = previous_admin_roles
+                await log_channel.send(f"Admin roles set to: {', '.join([f'<@&{role_id}>' for role_id in role_ids])}")
+            else:
+                role_ids = (
+                    [role.id for role in role_msg.role_mentions]
+                    or [int(r.strip()) for r in role_msg.content.split(",") if r.strip().isdigit()]
+                )
+                if not role_ids:
+                    await log_channel.send("No valid role IDs provided. Setup canceled.")
+                    return
+                await log_channel.send(f"Admin roles set to: {', '.join([f'<@&{role_id}>' for role_id in role_ids])}")
         except asyncio.TimeoutError:
             await log_channel.send("Setup timed out. Please run `/setup` again.")
             return
 
-        # Step 3: Ask for Mode (Single or Random)
-        await log_channel.send("What mode should the bot start with? Type `single` or `random`.")
+        # Step 3: Ask for Sound Mode (Single or Random)
+        await log_channel.send("What sound mode should the bot start with? Type `single` or `random`.\nSingle plays the same single sound. Random chooses a random sound from our sound folder.")
         try:
             mode_msg = await bot.wait_for('message', timeout=60.0, check=check_message)
             mode = mode_msg.content.strip().lower()
@@ -808,22 +814,101 @@ async def setup(interaction: discord.Interaction, channel: discord.TextChannel):
             await log_channel.send("Setup timed out. Please run `/setup` again.")
             return
 
-        # Step 4: Save Configuration
-        server_config = load_or_create_server_config(interaction.guild.id)
+        # Step 4: Ask for Join Frequency
+        await log_channel.send(
+            "How often should the bot join?\n"
+            "1. Every Hour\n"
+            "2. Allow user to choose timezones.\n"
+            "3. Do not automatically join (Manual joins only using /cheers)"
+        )
+        try:
+            frequency_msg = await bot.wait_for('message', timeout=60.0, check=check_message)
+            frequency_choice = frequency_msg.content.strip()
+
+            if frequency_choice == '1':
+                join_frequency = 'every_hour'
+                await log_channel.send("Join frequency set to: Every Hour")
+            elif frequency_choice == '2':
+                timezones = [
+                    "UTC -12 {ANAT}", "UTC -11 {AEDT}", "UTC -10 {AEST}", "UTC -9 {AKST}", "UTC -8 {PST}",
+                    "UTC -7 {MST}", "UTC -6 {CST}", "UTC -5 {EST}", "UTC -4 {AST}", "UTC -3 {BRT}",
+                    "UTC -2 {GST}", "UTC -1 {AZOT}", "UTC 0 {GMT}", "UTC +1 {CET}", "UTC +2 {EET}",
+                    "UTC +3 {MSK}", "UTC +4 {GST}", "UTC +5 {PKT}", "UTC +6 {BST}", "UTC +7 {ICT}",
+                    "UTC +8 {ChinaST}", "UTC +9 {JST}", "UTC +10 {AEST}", "UTC +11 {AEDT}", "UTC +12 {NZST}"
+                ]
+                embed = discord.Embed(title="Available Timezones", color=discord.Color.blue())
+                for i, tz in enumerate(timezones, 1):
+                    tz_offset = int(tz.split()[1].replace('UTC', '').replace('{', '').replace('}', ''))
+                    current_time = datetime.now(timezone(timedelta(hours=tz_offset))).strftime('%I:%M %p')
+                    embed.add_field(name=f"[{i}] {tz}", value=f"`Current Time: {current_time}`", inline=False)
+                await log_channel.send(embed=embed)
+                await log_channel.send("Please choose one or more timezones by entering their numbers separated by spaces (e.g., 1 3):")
+
+                try:
+                    tz_msg = await bot.wait_for('message', timeout=60.0, check=check_message)
+                    chosen_tz_indices = [int(i) for i in tz_msg.content.strip().split()]
+                    chosen_timezones = [timezones[i-1] for i in chosen_tz_indices]
+
+                    await log_channel.send(
+                        "The timezones you chose are:\n" +
+                        "\n".join([f"{tz} `Current Time: {datetime.now(timezone(timedelta(hours=int(tz.split()[1].replace('UTC', '').replace('{', '').replace('}', ''))))).strftime('%I:%M %p')}`" for tz in chosen_timezones]) +
+                        "\nAre you sure you want the bot to join during 4:20 in these timezones? (yes/no)"
+                    )
+
+                    confirm_msg = await bot.wait_for('message', timeout=60.0, check=check_message)
+                    if confirm_msg.content.strip().lower() == 'yes':
+                        join_frequency = 'timezones'
+                        join_timezones = chosen_timezones
+                        await log_channel.send("Join frequency set to: Specific Timezones")
+                    else:
+                        await log_channel.send("Setup canceled.")
+                        return
+                except asyncio.TimeoutError:
+                    await log_channel.send("Setup timed out. Please run `/setup` again.")
+                    return
+            elif frequency_choice == '3':
+                join_frequency = 'manual'
+                await log_channel.send("Join frequency set to: Manual joins only")
+            else:
+                await log_channel.send("Invalid choice. Setup canceled.")
+                return
+        except asyncio.TimeoutError:
+            await log_channel.send("Setup timed out. Please run `/setup` again.")
+            return
+
+        # Step 5: Save Configuration
         server_config.update({
             'log_channel_id': log_channel_id,
             'admin_roles': role_ids,
             'mode': mode,
+            'join_frequency': join_frequency,
+            'join_timezones': join_timezones if join_frequency == 'timezones' else []
         })
         save_config(interaction.guild.id, server_config)
 
+        # Load global config settings
+        with open(config_path, 'r') as f:
+            global_config = json.load(f)
+
+        log_settings = global_config.get("log_settings", {})
+        footer_text = log_settings.get("footer_text", "CheersBot V2.0 by HomiesHouse | Discord.gg/HomiesHouse")
+        footer_icon_url = log_settings.get("footer_icon_url", "https://i.imgur.com/4OO5wh0.png")
+        guild_icon_url = interaction.guild.icon.url if interaction.guild.icon else footer_icon_url
+
         # Confirmation Message
-        await log_channel.send(
-            f"Setup complete! Here's the summary:\n"
-            f"Log Channel: <#{log_channel_id}>\n"
-            f"Admin Roles: {', '.join(map(str, role_ids))}\n"
-            f"Mode: {mode.capitalize()}"
+        embed = discord.Embed(
+            title="Setup Complete",
+            description=(
+                f"**Log Channel:** <#{log_channel_id}>\n"
+                f"**Admin Roles:** {', '.join([f'<@&{role_id}>' for role_id in role_ids])}\n"
+                f"**Sound Mode:** {mode.capitalize()}\n"
+                f"**Join Frequency:** {join_frequency.capitalize()}"
+            ),
+            color=discord.Color.green()
         )
+        embed.set_thumbnail(url=guild_icon_url)
+        embed.set_footer(text=footer_text, icon_url=footer_icon_url)
+        await log_channel.send(embed=embed)
     except Exception as e:
         print(f"Error in setup: {e}")
         await log_channel.send(f"An error occurred: {e}")
@@ -1067,6 +1152,8 @@ async def setup_info(interaction: discord.Interaction):
     admin_roles = server_config.get('admin_roles', [])
     mode = server_config.get('mode', 'single')
     default_sound = server_config.get('default_sound', 'Cheers_Bitch.mp3')
+    join_frequency = server_config.get('join_frequency', 'every_hour')
+    join_timezones = server_config.get('join_timezones', [])
 
     log_channel = f"<#{log_channel_id}>" if log_channel_id else "Not set"
     admin_roles_mentions = ', '.join([f"<@&{role_id}>" for role_id in admin_roles]) if admin_roles else "None"
@@ -1078,9 +1165,13 @@ async def setup_info(interaction: discord.Interaction):
     )
     embed.add_field(name="Logging Channel", value=log_channel, inline=False)
     embed.add_field(name="Admin Roles", value=admin_roles_mentions, inline=False)
-    embed.add_field(name="Mode", value=mode.capitalize(), inline=False)
+    embed.add_field(name="Sound Mode", value=mode.capitalize(), inline=False)
     if mode == 'single':
         embed.add_field(name="Sound", value=sound, inline=False)
+    embed.add_field(name="Join Frequency", value=join_frequency.capitalize(), inline=False)
+    if join_frequency == 'timezones':
+        timezones_list = '\n'.join(join_timezones) if join_timezones else "None"
+        embed.add_field(name="Enabled Timezones", value=timezones_list, inline=False)
 
     await interaction.response.send_message(embed=embed)
 
@@ -1360,36 +1451,6 @@ class RollMoreButton(ui.Button):
 
     async def callback(self, interaction: Interaction):
         await roll.callback(interaction)  # Use the callback method of the command
-
-# Dictionary to store user cooldowns
-user_cooldowns = {}
-
-# Dictionary to store original profiles before maintenance mode
-original_profiles = {}
-
-# Dictionary to store temporary profiles during maintenance mode
-temp_profiles = {}
-
-class RollMoreButton(ui.Button):
-    def __init__(self):
-        super().__init__(label="Roll more", style=ButtonStyle.green)
-
-    async def callback(self, interaction: Interaction):
-        await roll.callback(interaction)  # Use the callback method of the command
-
-# Helper function to check if the user has started the game
-def has_started_game(user_id):
-    profile_path = os.path.join(GAME_FOLDER, f"{user_id}.json")
-    return os.path.exists(profile_path)
-
-# Helper function to prompt the user to start the game
-async def prompt_start_game(interaction):
-    embed = discord.Embed(
-        title="Start the Game",
-        description="You need to start the game before using this command. Please run the `/start` command to begin.",
-        color=discord.Color.red()
-    )
-    await interaction.response.send_message(embed=embed, ephemeral=True)
 
 # Command to roll some J's
 @bot.tree.command(name="roll", description="Roll some J's.")
@@ -1804,51 +1865,6 @@ class UpgradesView(ui.View):
             row = idx // 2  # 2 buttons per row
             self.add_item(BuyUpgradeButton(upgrade_name, user_id, row=row))
 
-async def handle_buy_upgrade(interaction: discord.Interaction, upgrade_name: str):
-    if is_server_blacklisted(interaction.guild.id):
-        await handle_blacklisted_server(interaction)
-        return
-    user_id = interaction.user.id
-
-    if not has_started_game(user_id):
-        await prompt_start_game(interaction)
-        return
-
-    if debug_mode:
-        profile = load_or_create_temp_profile(user_id)
-    else:
-        profile = load_or_create_profile(user_id)
-    
-    shop_config = load_or_create_shop_config()
-    upgrades = shop_config.get("upgrades", {})
-
-    if upgrade_name not in upgrades:
-        await interaction.response.send_message("Invalid upgrade name.", ephemeral=True)
-        return
-
-    current_purchases = profile.get(f"{upgrade_name}_purchases", 0)
-    cost, income_boost = calculate_upgrade_cost_and_boost(upgrade_name, current_purchases)
-
-    if profile["balance"] < cost:
-        await interaction.response.send_message(f"Not enough balance to buy {upgrade_name}. You need ${cost:.2f}.", ephemeral=True)
-        return
-
-    profile["balance"] -= cost
-    profile["income_per_hour"] += income_boost
-    profile[f"{upgrade_name}_purchases"] = current_purchases + 1
-
-    if not debug_mode:
-        save_profile(user_id, profile)
-    else:
-        temp_profiles[user_id] = profile
-
-    await interaction.response.send_message(f"Successfully bought {upgrade_name}! Your income per hour is now ${profile['income_per_hour']:.2f}. Next upgrade will cost ${cost:.2f}.")
-
-    # Update the view to show only the "Buy Again" button
-    view = ui.View()
-    view.add_item(BuyAgainButton(upgrade_name, user_id, row=0))
-    await interaction.edit_original_response(view=view)
-
 @bot.tree.command(name="upgrades", description="View and purchase available upgrades.")
 async def upgrades(interaction: discord.Interaction):
     if is_server_blacklisted(interaction.guild.id):
@@ -2188,6 +2204,72 @@ async def test(interaction: discord.Interaction):
         await log_channel.send(embed=embed)
 
     await interaction.followup.send("Test command completed. Check logs for details.", ephemeral=True)
+
+class UpdateEmbedView(ui.View):
+    def __init__(self, embed, interaction):
+        super().__init__(timeout=30)  # 30 seconds timeout for interaction
+        self.embed = embed
+        self.interaction = interaction
+
+    @ui.button(label="Send", style=ButtonStyle.green)
+    async def send_button(self, interaction: Interaction, button: ui.Button):
+        await self.send_update_to_all_servers()
+        await interaction.response.send_message("Update sent to all servers.", ephemeral=True)
+
+    async def send_update_to_all_servers(self):
+        for guild in bot.guilds:
+            server_config = load_or_create_server_config(guild.id)
+            log_channel_id = server_config.get('log_channel_id')
+            if log_channel_id:
+                log_channel = bot.get_channel(log_channel_id)
+                if log_channel:
+                    await log_channel.send(embed=self.embed)
+
+    async def on_timeout(self):
+        await self.interaction.edit_original_response(content="The update was not sent due to timeout.", embed=None, view=None)
+
+@bot.tree.command(name="update", description="Send an update message to all servers. Developer only.")
+async def update(interaction: discord.Interaction):
+    if not is_developer(interaction):
+        await interaction.response.send_message("You do not have permission to use this command.", ephemeral=True)
+        return
+
+    await interaction.response.send_message("Please enter the title for the update message:", ephemeral=True)
+
+    def check_message(msg: discord.Message):
+        return msg.author == interaction.user and msg.channel == interaction.channel
+
+    try:
+        title_msg = await bot.wait_for('message', timeout=60.0, check=check_message)
+        title = title_msg.content.strip()
+
+        await interaction.followup.send("Please enter the body for the update message:", ephemeral=True)
+        body_msg = await bot.wait_for('message', timeout=60.0, check=check_message)
+        body = body_msg.content.strip()
+
+        # Load global config settings
+        with open(config_path, 'r') as f:
+            global_config = json.load(f)
+
+        log_settings = global_config.get("log_settings", {})
+        footer_text = log_settings.get("footer_text", "CheersBot V2.0 by HomiesHouse | Discord.gg/HomiesHouse")
+        footer_icon_url = log_settings.get("footer_icon_url", "https://i.imgur.com/4OO5wh0.png")
+        thumbnail_url = log_settings.get("thumbnail_url", "https://i.imgur.com/4OO5wh0.png")
+
+        # Create the embed
+        embed = discord.Embed(
+            title=title,
+            description=body,
+            color=discord.Color.blue()
+        )
+        embed.set_thumbnail(url=thumbnail_url)
+        embed.set_footer(text=footer_text, icon_url=footer_icon_url)
+
+        view = UpdateEmbedView(embed, interaction)
+        await interaction.followup.send("Here is the preview of the update message:", embed=embed, view=view, ephemeral=True)
+
+    except asyncio.TimeoutError:
+        await interaction.followup.send("Update command timed out. Please run `/update` again.", ephemeral=True)
 
 bot.run(BOT_TOKEN)
 
