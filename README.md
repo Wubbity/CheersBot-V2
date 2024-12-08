@@ -12,9 +12,10 @@ The Public Version of CheersBot - A complete rewrite!
   - [/leave](#leave)
   - [/sounds](#sounds)
   - [/mode](#mode)
-  - [/reload](#reload)
   - [/setup-info](#setup-info)
   - [/cheers](#cheers)
+  - [/blacklist](#blacklist)
+  - [/usersettings](#usersettings)
 - [420Game Commands](#420game-commands)
   - [/start](#start)
   - [/profile](#profile)
@@ -29,11 +30,17 @@ The Public Version of CheersBot - A complete rewrite!
   - [/upgrades](#upgrades)
   - [/leaderboard](#leaderboard)
   - [/rename](#rename)
-  - [/blacklist](#blacklist)
+  - [/inventory](#inventory)
 - [Configuration](#configuration)
 - [Logging](#logging)
 - [Developer Information](#developer-information)
   - [/meetthedev](#meetthedev)
+- [Developer Only](#developer-only)
+  - [/reset_game_data](#reset_game_data)
+  - [/maintenance](#maintenance)
+  - [/server-blacklist](#server-blacklist)
+  - [/update](#update)
+  - [/reload](#reload)
 
 ## Introduction
 
@@ -42,10 +49,22 @@ CheersBot V2 is a Discord bot designed to enhance your server with fun and usefu
 ## Features
 
 - Join and leave voice channels.
-- Play sounds in voice channels.
+- Play sounds in voice channels at specified times.
 - Configure bot settings per server.
 - Log actions to a specified channel.
 - Admin role management.
+- Manage blacklist of channels for auto-join.
+- 420Game with various commands to roll, sell, upgrade, and manage your profile.
+  - Daily check-in bonuses.
+  - View and purchase upgrades from the shop.
+  - View game leaderboards.
+  - Rename your trap house.
+  - View your purchased items and their total income per hour.
+- Send feedback/images/audio to developers to be used to further development of CheersBot.
+- Manage server blacklist (Developer only).
+- Toggle maintenance mode (Developer only).
+- Send update messages to all servers (Developer only).
+- Reload commands globally (Developer only).
 
 ## Commands
 
@@ -105,6 +124,18 @@ CheersBot V2 is a Discord bot designed to enhance your server with fun and usefu
 **Description**: Play the cheers sound in a voice channel.
 
 **Usage**: `/cheers channel:<VoiceChannel>`
+
+### /blacklist
+
+**Description**: Manage the blacklist of channels for auto-join.
+
+**Usage**: `/blacklist action:<add|remove|list> channel:<VoiceChannel>`
+
+### /usersettings
+
+**Description**: Configure your payment settings.
+
+**Usage**: `/usersettings`
 
 ## 420Game Commands
 
@@ -186,17 +217,11 @@ CheersBot V2 is a Discord bot designed to enhance your server with fun and usefu
 
 **Usage**: `/rename new_name:<NewName>`
 
-### /blacklist
+### /inventory
 
-**Description**: Manage the blacklist of channels for auto-join.
+**Description**: View your purchased items and their total income per hour.
 
-**Usage**: `/blacklist action:<add|remove|list> channel:<VoiceChannel>`
-
-### /usersettings
-
-**Description**: Configure your payment settings.
-
-**Usage**: `/usersettings`
+**Usage**: `/inventory`
 
 ## Configuration
 
@@ -237,6 +262,38 @@ The bot includes developer-specific functionalities and commands. Developer IDs 
 **Description**: Meet the developer of CheersBot - @Wubbity.
 
 **Usage**: `/meetthedev`
+
+### Developer Only
+
+#### /reset_game_data
+
+**Description**: Reset/delete all user data from the 420Game. Bot developer only command.
+
+**Usage**: `/reset_game_data`
+
+#### /maintenance
+
+**Description**: Toggle maintenance mode. Restricted to @Wubbity.
+
+**Usage**: `/maintenance`
+
+#### /server-blacklist
+
+**Description**: Manage the server blacklist. Restricted to bot developers.
+
+**Usage**: `/server-blacklist action:<add|remove|list> server_id:<ServerID> reason:<Reason>`
+
+#### /update
+
+**Description**: Send an update message to all servers. Developer only.
+
+**Usage**: `/update`
+
+#### /reload
+
+**Description**: Reload commands for all servers globally. Developer only.
+
+**Usage**: `/reload`
 
 For any issues or support, please reach out to the support team at [Discord.gg/HomiesHouse](https://discord.gg/HomiesHouse).
 

@@ -612,6 +612,106 @@ async def on_guild_remove(guild):
         os.remove(config_file)
         print(f"Deleted config for {guild.name} (ID: {guild.id})")
 
+# Feedback command
+@bot.tree.command(name="feedback", description="Send feedback to the developers.")
+async def feedback(interaction: discord.Interaction):
+    if is_server_blacklisted(interaction.guild.id):
+        await handle_blacklisted_server(interaction)
+        return
+
+    feedback_channel_id = 1315133468337770578  # Developer feedback channel ID from config.json
+
+    embed = discord.Embed(
+        title="Feedback Command",
+        description=(
+            "Please write your entire feedback in a single message. If you have any images or audio files (.mp3, .m4a, .wav, .ogg), "
+            "please attach them to your message. You have 5 minutes to complete this action."
+        ),
+        color=discord.Color.blue()
+    )
+    await interaction.response.send_message(embed=embed, ephemeral=True)
+
+    def check_message(msg: discord.Message):
+        return msg.author == interaction.user and msg.channel == interaction.channel
+
+    try:
+        feedback_msg = await bot.wait_for('message', timeout=300.0, check=check_message)  # Wait for 5 minutes
+
+        # Send "Working..." embed
+        working_embed = discord.Embed(
+            title="Working...",
+            description="Processing your feedback. Please wait. Adding images or audio files may take longer than expected.",
+            color=discord.Color.orange()
+        )
+        working_message = await interaction.followup.send(embed=working_embed, ephemeral=True)
+
+        # Create the feedback embed
+        feedback_embed = discord.Embed(
+            title="User Feedback",
+            description=f"{feedback_msg.content}\n\nFeedback from <@{interaction.user.id}>",
+            color=discord.Color.green()
+        )
+        feedback_embed.set_author(name=interaction.user.name, icon_url=interaction.user.avatar.url)
+
+        # Load global config settings for footer
+        with open(config_path, 'r') as f:
+            global_config = json.load(f)
+        log_settings = global_config.get("log_settings", {})
+        footer_text = log_settings.get("footer_text", "CheersBot V2.0 by HomiesHouse | Discord.gg/HomiesHouse")
+        footer_icon_url = log_settings.get("footer_icon_url", "https://i.imgur.com/4OO5wh0.png")
+        thumbnail_url = log_settings.get("thumbnail_url", "https://i.imgur.com/4OO5wh0.png")
+
+        feedback_embed.set_footer(text=footer_text, icon_url=footer_icon_url)
+        feedback_embed.set_thumbnail(url=thumbnail_url)
+
+        # Send the feedback embed first
+        feedback_channel = bot.get_channel(feedback_channel_id)
+        if feedback_channel:
+            await feedback_channel.send(embed=feedback_embed)
+
+        # Attach images and audio files
+        files = []
+        image_count = 0
+        audio_count = 0
+        for attachment in feedback_msg.attachments:
+            if attachment.filename.lower().endswith(('.mp3', '.m4a', '.wav', '.ogg')):
+                files.append(await attachment.to_file())
+                audio_count += 1
+            elif attachment.filename.lower().endswith(('.png', '.jpg', '.jpeg', '.gif')):
+                files.append(await attachment.to_file())
+                image_count += 1
+
+        if files:
+            await feedback_channel.send(files=files)
+
+        # Clean up messages
+        await feedback_msg.delete()
+        await interaction.delete_original_response()
+
+        # Notify the user
+        confirmation_embed = discord.Embed(
+            title="Feedback Sent",
+            description="Your feedback has been sent successfully.",
+            color=discord.Color.green()
+        )
+        if image_count > 0 or audio_count > 0:
+            confirmation_embed.add_field(name="Attachments", value=f"{image_count} image(s), {audio_count} audio file(s)", inline=False)
+        confirmation_embed.add_field(name="Note", value="If you receive a friend request from <@171091643510816768>, I may be sending you a request to get more information on your feedback.", inline=False)
+        await working_message.edit(embed=confirmation_embed)
+        await asyncio.sleep(30)
+        await working_message.delete()
+
+    except asyncio.TimeoutError:
+        await interaction.delete_original_response()
+        timeout_embed = discord.Embed(
+            title="Feedback Command",
+            description="The feedback command timed out. Please run `/feedback` again.",
+            color=discord.Color.red()
+        )
+        timeout_message = await interaction.channel.send(embed=timeout_embed)
+        await asyncio.sleep(30)
+        await timeout_message.delete()
+
 # Auto-Join Task
 @tasks.loop(seconds=1)
 async def auto_join_task():
@@ -663,7 +763,8 @@ async def join_all_populated_voice_channels(guild):
         print(f"Scheduling join for {voice_channel.name} in {guild.name}...")
         await join_voice_channel(guild, voice_channel, bot.user)  # Join the voice channel
     else:
-        print(f"No valid voice channels to join in {guild.name}. Skipping join action.")
+        if debug_mode:
+            print(f"No valid voice channels to join in {guild.name}. Skipping join action.")
 
 async def play_sound_in_all_channels(guild):
     """Play the configured sound in all voice channels where the bot is connected in the specified guild."""
