@@ -1,8 +1,5 @@
 # CheersBot v2 - A Discord bot by Wubbity. Cheers!
 
-# Dictionary to store temporary profiles during maintenance mode
-temp_profiles = {}
-
 import discord
 from discord.ext import commands, tasks
 from discord import app_commands
@@ -16,6 +13,7 @@ import pytz
 import platform
 from discord import ui, ButtonStyle, Interaction
 import math
+from discord.ext.commands import AutoShardedBot
 
 # Load environment variables
 load_dotenv()
@@ -390,7 +388,7 @@ intents.guilds = True
 intents.members = True
 intents.messages = True
 
-bot = commands.Bot(command_prefix="!", intents=intents)
+bot = AutoShardedBot(command_prefix="!", intents=intents)
 
 # Add a prefix for the text command "sync"
 bot.command_prefix = "."
