@@ -613,6 +613,17 @@ async def on_guild_remove(guild):
 # Feedback command
 @bot.tree.command(name="feedback", description="Send feedback to the developers.")
 async def feedback(interaction: discord.Interaction):
+    feedback_bans = load_feedback_bans()
+    if str(interaction.user.id) in feedback_bans:
+        reason = feedback_bans[str(interaction.user.id)]
+        embed = discord.Embed(
+            title="Feedback Ban",
+            description=f"You have been banned from using the /feedback command for the following reason: {reason}",
+            color=discord.Color.red()
+        )
+        await interaction.response.send_message(embed=embed, ephemeral=True)
+        return
+
     if is_server_blacklisted(interaction.guild.id):
         await handle_blacklisted_server(interaction)
         return
@@ -2369,6 +2380,32 @@ async def update(interaction: discord.Interaction):
 
     except asyncio.TimeoutError:
         await interaction.followup.send("Update command timed out. Please run `/update` again.", ephemeral=True)
+
+# Path to store feedback bans
+FEEDBACK_BANS_PATH = os.path.join(SERVER_LOG_DIR, "FeedbackBans.json")
+
+def load_feedback_bans():
+    if os.path.exists(FEEDBACK_BANS_PATH):
+        with open(FEEDBACK_BANS_PATH, 'r') as f:
+            return json.load(f)
+    return {}
+
+def save_feedback_bans(feedback_bans):
+    with open(FEEDBACK_BANS_PATH, 'w') as f:
+        json.dump(feedback_bans, f, indent=4)
+
+@bot.tree.command(name="feedback-ban", description="Ban a user from using the /feedback command. Developer only.")
+@app_commands.describe(user="The user to ban from using /feedback.", reason="The reason for banning the user.")
+async def feedback_ban(interaction: discord.Interaction, user: discord.User, reason: str):
+    if not is_developer(interaction):
+        await interaction.response.send_message("You do not have permission to use this command.", ephemeral=True)
+        return
+
+    feedback_bans = load_feedback_bans()
+    feedback_bans[str(user.id)] = reason
+    save_feedback_bans(feedback_bans)
+
+    await interaction.response.send_message(f"User {user.mention} has been banned from using the /feedback command for the following reason: {reason}", ephemeral=True)
 
 bot.run(BOT_TOKEN)
 
