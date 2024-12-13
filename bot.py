@@ -531,11 +531,6 @@ async def on_ready():
         print(f"Master server list path: {MASTER_SERVER_LIST_PATH}")
     else:
         print("Debug mode is disabled.")
-    
-    auto_join_task.start()  # Start the auto join task
-    log_current_time_task.start()  # Start the time logging task
-    update_profiles_task.start()  # Start the profile update task
-    update_user_settings_task.start()  # Start the user settings update task
 
     # Check if the current time is between X:15 and X:20
     now = datetime.now(timezone.utc)
@@ -545,6 +540,23 @@ async def on_ready():
 
     # Sync game commands
     await bot.tree.sync()
+
+@bot.event
+async def on_resumed():
+    print("Bot has resumed connection.")
+    if not auto_join_task.is_running():
+        auto_join_task.start()  # Ensure the auto join task is running
+    if not log_current_time_task.is_running():
+        log_current_time_task.start()  # Ensure the time logging task is running
+    if not update_profiles_task.is_running():
+        update_profiles_task.start()  # Ensure the profile update task is running
+    if not update_user_settings_task.is_running():
+        update_user_settings_task.start()  # Ensure the user settings update task is running
+
+    # Rejoin voice channels if necessary
+    for guild in bot.guilds:
+        if guild.voice_client and not guild.voice_client.is_connected():
+            await join_all_populated_voice_channels(guild)
 
 async def send_intro_message(guild):
     """Send an introductory message to the appropriate channel."""
