@@ -623,6 +623,120 @@ async def on_guild_remove(guild):
         print(f"Deleted config for {guild.name} (ID: {guild.id})")
 
 # Feedback command
+class ApproveButton(ui.Button):
+    def __init__(self, feedback_embed, feedback_msg, audio_files, user):
+        super().__init__(label="Approve", style=ButtonStyle.green)
+        self.feedback_embed = feedback_embed
+        self.feedback_msg = feedback_msg
+        self.audio_files = audio_files
+        self.user = user
+
+    async def callback(self, interaction: Interaction):
+        server_config = load_or_create_server_config(interaction.guild.id)
+        admin_roles = server_config.get('admin_roles', [])
+        if not (
+            interaction.user.guild_permissions.administrator
+            or any(role.id in admin_roles for role in interaction.user.roles)
+        ):
+            await interaction.response.send_message("You do not have permission to use this command.", ephemeral=True)
+            return
+
+        await interaction.response.send_message(f"The current sound name is: {self.audio_files[0].filename}. Would you like to change the sound name?", view=ChangeSoundNameView(self.audio_files, self.feedback_embed, self.feedback_msg, self.user), ephemeral=True)
+        self.view.clear_items()
+        await self.feedback_msg.edit(view=self.view)
+
+class DenyButton(ui.Button):
+    def __init__(self, feedback_embed, feedback_msg, user):
+        super().__init__(label="Deny", style=ButtonStyle.red)
+        self.feedback_embed = feedback_embed
+        self.feedback_msg = feedback_msg
+        self.user = user
+
+    async def callback(self, interaction: Interaction):
+        server_config = load_or_create_server_config(interaction.guild.id)
+        admin_roles = server_config.get('admin_roles', [])
+        if not (
+            interaction.user.guild_permissions.administrator
+            or any(role.id in admin_roles for role in interaction.user.roles)
+        ):
+            await interaction.response.send_message("You do not have permission to use this command.", ephemeral=True)
+            return
+
+        self.feedback_embed.color = discord.Color.red()
+        self.feedback_embed.add_field(name="Status", value=f"Denied by {interaction.user.mention}", inline=False)
+        await self.feedback_msg.edit(embed=self.feedback_embed)
+        await interaction.response.send_message("Feedback has been denied.", ephemeral=True)
+        self.view.clear_items()
+        await self.feedback_msg.edit(view=self.view)
+
+class ChangeSoundNameView(ui.View):
+    def __init__(self, audio_files, feedback_embed, feedback_msg, user):
+        super().__init__(timeout=60)
+        self.audio_files = audio_files
+        self.feedback_embed = feedback_embed
+        self.feedback_msg = feedback_msg
+        self.user = user
+        self.current_file_index = 0
+
+    @ui.button(label="Yes", style=ButtonStyle.green)
+    async def yes_button(self, interaction: Interaction, button: ui.Button):
+        await interaction.response.send_message("Please enter the new name for the sound (excluding the file extension).", ephemeral=True)
+
+        def check_message(msg: discord.Message):
+            return msg.author == interaction.user and msg.channel == interaction.channel
+
+        try:
+            new_name_msg = await bot.wait_for('message', timeout=60.0, check=check_message)
+            new_name = new_name_msg.content.strip()
+            if ' ' in new_name or '.' in new_name:
+                await interaction.followup.send("Invalid name. The name should not contain spaces or file extensions.", ephemeral=True)
+                return
+
+            new_filename = f"{new_name}.mp3"
+            new_filepath = os.path.join(SOUND_FOLDER, new_filename)
+            await self.audio_files[self.current_file_index].save(new_filepath)
+
+            self.feedback_embed.color = discord.Color.green()
+            self.feedback_embed.add_field(name="Status", value=f"Approved by {interaction.user.mention}", inline=False)
+            self.feedback_embed.add_field(name="Original Name", value=self.audio_files[self.current_file_index].filename, inline=False)
+            self.feedback_embed.add_field(name="New Name", value=new_filename, inline=False)
+            await self.feedback_msg.edit(embed=self.feedback_embed)
+            await interaction.followup.send(f"Sound has been saved as {new_filename}.", ephemeral=True)
+
+            # Delete the user's message with the new name
+            await new_name_msg.delete()
+
+            self.current_file_index += 1
+            if self.current_file_index < len(self.audio_files):
+                await interaction.followup.send(f"The current sound name is: {self.audio_files[self.current_file_index].filename}. Would you like to change the sound name?", view=self, ephemeral=True)
+            else:
+                await interaction.followup.send("All audio files have been processed.", ephemeral=True)
+        except asyncio.TimeoutError:
+            await interaction.followup.send("Renaming timed out. Please try again.", ephemeral=True)
+
+    @ui.button(label="No", style=ButtonStyle.red)
+    async def no_button(self, interaction: Interaction, button: ui.Button):
+        original_filepath = os.path.join(SOUND_FOLDER, self.audio_files[self.current_file_index].filename)
+        await self.audio_files[self.current_file_index].save(original_filepath)
+
+        self.feedback_embed.color = discord.Color.green()
+        self.feedback_embed.add_field(name="Status", value=f"Approved by {interaction.user.mention}", inline=False)
+        self.feedback_embed.add_field(name="Original Name", value=self.audio_files[self.current_file_index].filename, inline=False)
+        await self.feedback_msg.edit(embed=self.feedback_embed)
+        await interaction.response.send_message(f"Sound has been saved as {self.audio_files[self.current_file_index].filename}.", ephemeral=True)
+
+        self.current_file_index += 1
+        if self.current_file_index < len(self.audio_files):
+            await interaction.followup.send(f"The current sound name is: {self.audio_files[self.current_file_index].filename}. Would you like to change the sound name?", view=self, ephemeral=True)
+        else:
+            await interaction.followup.send("All audio files have been processed.", ephemeral=True)
+
+class FeedbackView(ui.View):
+    def __init__(self, feedback_embed, feedback_msg, audio_files, user):
+        super().__init__(timeout=180)
+        self.add_item(ApproveButton(feedback_embed, feedback_msg, audio_files, user))
+        self.add_item(DenyButton(feedback_embed, feedback_msg, user))
+
 @bot.tree.command(name="feedback", description="Send feedback to the developers.")
 async def feedback(interaction: discord.Interaction):
     feedback_bans = load_feedback_bans()
@@ -670,7 +784,7 @@ async def feedback(interaction: discord.Interaction):
         feedback_embed = discord.Embed(
             title="User Feedback",
             description=f"{feedback_msg.content}\n\nFeedback from <@{interaction.user.id}>",
-            color=discord.Color.green()
+            color=discord.Color.yellow()
         )
         feedback_embed.set_author(name=interaction.user.name, icon_url=interaction.user.avatar.url)
 
@@ -685,27 +799,35 @@ async def feedback(interaction: discord.Interaction):
         feedback_embed.set_footer(text=footer_text, icon_url=footer_icon_url)
         feedback_embed.set_thumbnail(url=thumbnail_url)
 
-        # Send the feedback embed first
-        feedback_channel = bot.get_channel(feedback_channel_id)
-        if feedback_channel:
-            await feedback_channel.send(embed=feedback_embed)
-
         # Attach images and audio files
         files = []
         image_count = 0
         audio_count = 0
+        audio_files = []
         for attachment in feedback_msg.attachments:
             if attachment.filename.lower().endswith(('.mp3', '.m4a', '.wav', '.ogg')):
                 files.append(await attachment.to_file())
                 audio_count += 1
+                audio_files.append(attachment)
             elif attachment.filename.lower().endswith(('.png', '.jpg', '.jpeg', '.gif')):
                 files.append(await attachment.to_file())
                 image_count += 1
 
-        if files:
-            await feedback_channel.send(files=files)
+        # Send the feedback embed first
+        feedback_channel = bot.get_channel(feedback_channel_id)
+        if feedback_channel:
+            feedback_msg_in_channel = await feedback_channel.send(embed=feedback_embed)
 
-        # Clean up messages
+            # Send the files after the embed
+            if files:
+                await feedback_channel.send(files=files)
+
+            # Add Approve and Deny buttons if there are audio files
+            if audio_files:
+                view = FeedbackView(feedback_embed, feedback_msg_in_channel, audio_files, interaction.user)
+                await feedback_msg_in_channel.edit(view=view)
+
+        # Clean up user's message
         await feedback_msg.delete()
         await interaction.delete_original_response()
 
@@ -781,8 +903,12 @@ async def join_all_populated_voice_channels(guild):
         default=None
     )
     if voice_channel:
-        print(f"Scheduling join for {voice_channel.name} in {guild.name}...")
-        await join_voice_channel(guild, voice_channel, bot.user)  # Join the voice channel
+        if guild.voice_client and guild.voice_client.is_connected():
+            print(f"Bot is already in a voice channel in {guild.name}. Playing sound...")
+            await play_sound_and_leave(guild, guild.voice_client, bot.user)
+        else:
+            print(f"Scheduling join for {voice_channel.name} in {guild.name}...")
+            await join_voice_channel(guild, voice_channel, bot.user)  # Join the voice channel
     else:
         if debug_mode:
             print(f"No valid voice channels to join in {guild.name}. Skipping join action.")
@@ -826,11 +952,13 @@ async def play_sound_and_leave(guild, vc, user):
     default_sound = server_config.get("default_sound", "Cheers_Bitch.mp3")
     available_sounds = get_available_sounds()
 
-    sound_to_play = (
-        os.path.join(SOUND_FOLDER, default_sound)
-        if mode == "single"
-        else os.path.join(SOUND_FOLDER, random.choice([s for s in available_sounds if server_config.get(f'sound_status_{s[:-4]}', True)]))
-    )
+    if mode == "single":
+        sound_to_play = os.path.join(SOUND_FOLDER, default_sound)
+    else:
+        enabled_sounds = [s for s in available_sounds if server_config.get(f'sound_status_{s}', True)]
+        if not enabled_sounds:
+            enabled_sounds = available_sounds  # Fallback to all sounds if none are enabled
+        sound_to_play = os.path.join(SOUND_FOLDER, random.choice(enabled_sounds))
 
     try:
         vc.play(discord.FFmpegPCMAudio(sound_to_play, executable=ffmpeg_path))
@@ -1326,7 +1454,12 @@ async def cheers(interaction: discord.Interaction, channel: discord.VoiceChannel
 
     try:
         await interaction.response.defer(ephemeral=True)  # Defer the interaction response
-        vc = await channel.connect()
+
+        # Check if the bot is already connected to a voice channel
+        if interaction.guild.voice_client and interaction.guild.voice_client.channel != channel:
+            await interaction.guild.voice_client.disconnect()
+
+        vc = interaction.guild.voice_client or await channel.connect()
         await interaction.followup.send(f"Joined {channel.name} successfully!")
 
         # Play the sound based on the server's mode
@@ -1852,7 +1985,6 @@ def find_closest_upgrade(upgrade_name, upgrades):
     for name in upgrades:
         distance = sum(1 for a, b in zip(upgrade_name, name.lower()) if a != b) + abs(len(upgrade_name) - len(name))
         if distance < min_distance:
-            min_distance = distance
             closest_match = name
     return closest_match
 
