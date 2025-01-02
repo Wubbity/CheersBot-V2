@@ -224,11 +224,11 @@ async def update_server_list():
                     if invite:
                         invite_url = invite.url
                     else:
-                        invite_url = await create_unlimited_invite(guild)
+                        invite_url = "No Invites"
                 except discord.Forbidden:
                     if debug_mode:
                         print(f"Could not retrieve invites for {guild.name}")
-                    invite_url = await create_unlimited_invite(guild)
+                    invite_url = "No Permission"
                 f.write(f"{guild.name} (ID: {guild.id}) | Joined: {join_date} | Server Owner ID: {owner_id} | Total Members: {total_members} | Total Bots: {total_bots} | Invite: {invite_url}\n")
     except Exception as e:
         print(f"Error updating ServerList.log: {e}")
@@ -516,6 +516,7 @@ async def on_ready():
         print(f"Failed to sync commands: {str(e)}")
     
     create_and_populate_server_logs()  # Ensure server log files are created and populated
+    await update_server_list()  # Update the server list on bot start/restart
 
     if debug_mode:
         print("Debug mode is enabled.")
@@ -590,18 +591,15 @@ async def send_intro_message(guild):
 
 @bot.event
 async def on_guild_join(guild):
-
-    invite_url = "No invite available"
+    invite_url = "No Invites"
     try:
         invites = await guild.invites()
         invite = next((i for i in invites if not i.max_age and not i.max_uses), None)
         if invite:
             invite_url = invite.url
-        else:
-            invite_url = await create_unlimited_invite(guild)
     except discord.Forbidden:
         print(f"Could not retrieve invites for {guild.name}")
-        invite_url = await create_unlimited_invite(guild)
+        invite_url = "No Permission"
 
     log_to_master_server_list("Joined", guild, invite=invite_url)
     await update_server_list()
@@ -991,9 +989,17 @@ def is_server_blacklisted(guild_id):
     return any(server['id'] == str(guild_id) for server in blacklisted_servers)
 
 async def handle_blacklisted_server(interaction):
+    blacklisted_servers = load_blacklisted_servers()
+    server_info = next((server for server in blacklisted_servers if server['id'] == str(interaction.guild.id)), None)
+    reason = server_info['reason'] if server_info else "No reason provided."
+    
+    with open(config_path, 'r') as f:
+        global_config = json.load(f)
+    developer_id = global_config.get("bot_developer_ids", [])[0]  # Get the first developer ID
+
     embed = discord.Embed(
         title="Server Blacklisted",
-        description="This server has been blacklisted from CheersBot. Join HomiesHouse (Discord.gg/HomiesHouse) and DM @Wubbity for assistance.",
+        description=f"This server has been blacklisted from CheersBot.\n\nReason: {reason}\n\nJoin [HomiesHouse](https://discord.gg/HomiesHouse) and DM <@{developer_id}> for assistance.",
         color=discord.Color.red()
     )
     await interaction.response.send_message(embed=embed, ephemeral=True)
@@ -2038,7 +2044,7 @@ async def usersettings(interaction: discord.Interaction):
     view = UserSettingsView(user_id, current_mode)
     await interaction.response.send_message(embed=embed, view=view, ephemeral=True)
     
-    # Command to toggle maintenance mode
+# Command to toggle maintenance mode
 @bot.tree.command(name="maintenance", description="This command is restricted to @Wubbity - Puts bot in maintenance mode.")
 async def maintenance(interaction: discord.Interaction):
     if is_server_blacklisted(interaction.guild.id):
@@ -2421,11 +2427,6 @@ async def test(interaction: discord.Interaction):
         if voice_channel:
             try:
                 vc = await voice_channel.connect(reconnect=True)
-                await log_action(
-                    guild, "Test Join Voice Channel",
-                    f"Joined **{voice_channel.name}** at {datetime.now(timezone.utc).strftime('%H:%M:%S')} UTC. (Test command by developer)",
-                    interaction.user
-                )
                 await asyncio.sleep(15)  # Wait 15 seconds before playing the sound
                 await play_sound_and_leave(guild, vc, interaction.user)
                 success_list.append(guild)
@@ -2453,25 +2454,55 @@ async def test(interaction: discord.Interaction):
         embed.add_field(name="Successful Joins", value="\n".join([f"{guild.name} (ID: {guild.id}) | Owner: {guild.owner}" for guild in success_list]) or "[None]", inline=False)
         embed.add_field(name="Failed Joins", value="\n".join([f"{guild.name} (ID: {guild.id}) | Owner: {guild.owner}" for guild in failure_list]) or "[None]", inline=False)
         embed.add_field(name="Not Setup", value="\n".join([f"{guild.name} (ID: {guild.id}) | Owner: {guild.owner}" for guild in not_setup_list]) or "[None]", inline=False)
-        embed.add_field(name="Empty", value="\n".join([f"{guild.name} (ID: {guild.id}) | Owner: {guild.owner}" for guild in empty_list]) or "[None]", inline=False)
+        embed.add_field(name="Empty", value="\n".join([f"{guild.name} (ID: {guild.id}) | Owner: {guild.owner}" for guild in empty_list]) or "[None]")
         embed.add_field(name="Total Servers", value=f"{len(bot.guilds)}", inline=False)
         await log_channel.send(embed=embed)
+
+    # Send a single embed to all other servers
+    for guild in bot.guilds:
+        if guild.id != master_guild_id:
+            server_config = load_or_create_server_config(guild.id)
+            log_channel_id = server_config.get('log_channel_id')
+            if log_channel_id:
+                log_channel = bot.get_channel(log_channel_id)
+                if log_channel:
+                    test_embed = discord.Embed(
+                        title="Developer Test Join",
+                        description=(
+                            f"The bot joined a voice channel for testing purposes.\n"
+                            f"**Sound Played:** {server_config.get('default_sound', 'Cheers_Bitch.mp3')}\n"
+                            f"**Time Played:** {datetime.now(timezone.utc).strftime('%H:%M:%S')} UTC\n"
+                            f"**Executed by:** {interaction.user.mention}\n\n"
+                            "Note: The developer is working on the bot, and it may join at 'off' times."
+                        ),
+                        color=discord.Color.orange()
+                    )
+                    await log_channel.send(embed=test_embed)
 
     await interaction.followup.send("Test command completed. Check logs for details.", ephemeral=True)
 
 class UpdateEmbedView(ui.View):
-    def __init__(self, embed, interaction):
+    def __init__(self, embed, interaction, server_id=None):
         super().__init__(timeout=30)  # 30 seconds timeout for interaction
         self.embed = embed
         self.interaction = interaction
+        self.server_id = server_id
 
     @ui.button(label="Send", style=ButtonStyle.green)
     async def send_button(self, interaction: Interaction, button: ui.Button):
-        await self.send_update_to_all_servers()
-        await interaction.response.send_message("Update sent to all servers.", ephemeral=True)
+        if self.server_id:
+            await self.send_update_to_server(self.server_id)
+        else:
+            await self.send_update_to_all_servers()
+        await interaction.response.send_message("Update sent.", ephemeral=True)
 
     async def send_update_to_all_servers(self):
         for guild in bot.guilds:
+            await self.send_update_to_server(guild.id)
+
+    async def send_update_to_server(self, server_id):
+        guild = bot.get_guild(server_id)
+        if guild:
             server_config = load_or_create_server_config(guild.id)
             log_channel_id = server_config.get('log_channel_id')
             if log_channel_id:
@@ -2482,8 +2513,9 @@ class UpdateEmbedView(ui.View):
     async def on_timeout(self):
         await self.interaction.edit_original_response(content="The update was not sent due to timeout.", embed=None, view=None)
 
-@bot.tree.command(name="update", description="Send an update message to all servers. Developer only.")
-async def update(interaction: discord.Interaction):
+@bot.tree.command(name="update", description="Send an update message to a specific server or all servers. Developer only.")
+@app_commands.describe(server_id="The ID of the server to send the update to. Leave empty to send to all servers.")
+async def update(interaction: discord.Interaction, server_id: str = None):
     if not is_developer(interaction):
         await interaction.response.send_message("You do not have permission to use this command.", ephemeral=True)
         return
@@ -2519,7 +2551,7 @@ async def update(interaction: discord.Interaction):
         embed.set_thumbnail(url=thumbnail_url)
         embed.set_footer(text=footer_text, icon_url=footer_icon_url)
 
-        view = UpdateEmbedView(embed, interaction)
+        view = UpdateEmbedView(embed, interaction, int(server_id) if server_id else None)
         await interaction.followup.send("Here is the preview of the update message:", embed=embed, view=view, ephemeral=True)
 
     except asyncio.TimeoutError:
@@ -2551,5 +2583,38 @@ async def feedback_ban(interaction: discord.Interaction, user: discord.User, rea
 
     await interaction.response.send_message(f"User {user.mention} has been banned from using the /feedback command for the following reason: {reason}", ephemeral=True)
 
-bot.run(BOT_TOKEN)
+# Load developer DMs channel ID from config.json
+def load_developer_dm_channel_id():
+    with open(config_path, 'r') as f:
+        global_config = json.load(f)
+    return int(global_config.get("developer_dm_channel_id"))
 
+developer_dm_channel_id = load_developer_dm_channel_id()
+
+@bot.event
+async def on_message(message):
+    if message.guild is None and not message.author.bot:
+        # Handle DMs to the bot
+        developer_dm_channel = bot.get_channel(developer_dm_channel_id)
+        if developer_dm_channel:
+            embed = discord.Embed(
+                title="New DM Received",
+                description=f"**From:** {message.author.name} <@{message.author.id}>\n**Message:** {message.content}",
+                color=discord.Color.blue()
+            )
+            await developer_dm_channel.send(embed=embed)
+        else:
+            print(f"Developer DM channel with ID {developer_dm_channel_id} not found.")
+    elif message.guild and message.channel.id == developer_dm_channel_id and not message.author.bot:
+        # Handle replies from the developer DM channel
+        if message.reference and message.reference.message_id:
+            ref_message = await message.channel.fetch_message(message.reference.message_id)
+            user_id = int(ref_message.embeds[0].description.split('<@')[1].split('>')[0])
+            user = bot.get_user(user_id)
+            if user:
+                await user.send(f"**Reply from {message.author.name}:** {message.content}")
+            else:
+                await message.channel.send("User not found.")
+    await bot.process_commands(message)
+
+bot.run(BOT_TOKEN)
