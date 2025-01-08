@@ -14,6 +14,8 @@ import platform
 from discord import ui, ButtonStyle, Interaction
 import math
 from discord.ext.commands import AutoShardedBot
+import importlib.util
+from apscheduler.schedulers.asyncio import AsyncIOScheduler
 
 # Load environment variables
 load_dotenv()
@@ -276,7 +278,7 @@ intents.messages = True
 bot = AutoShardedBot(command_prefix="!", intents=intents)
 
 # Add a prefix for the text command "sync"
-bot.command_prefix = "."
+bot.command_prefix = "c."
 
 def is_developer(interaction: discord.Interaction) -> bool:
     with open(config_path, 'r') as f:
@@ -339,7 +341,58 @@ async def log_current_time_task():
     if now.minute % 5 == 0 and now.second == 0:
         print(f"Current time is {now.strftime('%H:%M')}")
 
-# Events
+# Load commands from the "commands" folder
+async def load_commands():
+    commands_dir = os.path.join(BASE_DIR, 'commands')
+    if not os.path.exists(commands_dir):
+        print(f"Commands directory does not exist: {commands_dir}")
+        return
+
+    for filename in os.listdir(commands_dir):
+        if filename.endswith('.py'):  # Change to load Python files
+            filepath = os.path.join(commands_dir, filename)
+            if not os.path.exists(filepath):
+                print(f"Command file does not exist: {filepath}")
+                continue
+
+            spec = importlib.util.spec_from_file_location(filename[:-3], filepath)
+            if spec and spec.loader:
+                try:
+                    module = importlib.util.module_from_spec(spec)
+                    spec.loader.exec_module(module)
+                    if hasattr(module, 'setup'):
+                        await module.setup(bot)
+                        print(f"Loaded command module: {filename}")
+                    else:
+                        print(f"Module {filename} does not have a setup function.")
+                except Exception as e:
+                    print(f"Error loading command module {filename}: {e}")
+            else:
+                print(f"Failed to load command module: {filename}")
+
+async def load_extensions():
+    for filename in os.listdir('./commands'):
+        if filename.endswith('.py'):
+            await bot.load_extension(f'commands.{filename[:-3]}')
+
+# Initialize the scheduler
+scheduler = AsyncIOScheduler()
+
+# Function to schedule join tasks
+def schedule_join_tasks():
+    for guild in bot.guilds:
+        server_config = load_or_create_server_config(guild.id)
+        join_frequency = server_config.get('join_frequency', 'every_hour')
+        if join_frequency == 'every_hour':
+            scheduler.add_job(join_all_populated_voice_channels, 'cron', minute=15, args=[guild])
+            scheduler.add_job(play_sound_in_all_channels, 'cron', minute=20, args=[guild])
+        elif join_frequency == 'timezones':
+            join_timezones = server_config.get('join_timezones', [])
+            for tz in join_timezones:
+                tz_offset = int(tz.split()[1].replace('UTC', '').replace('{', '').replace('}', ''))
+                scheduler.add_job(join_all_populated_voice_channels, 'cron', minute=15, hour='*', timezone=timezone(timedelta(hours=tz_offset)), args=[guild])
+                scheduler.add_job(play_sound_in_all_channels, 'cron', minute=20, hour='*', timezone=timezone(timedelta(hours=tz_offset)), args=[guild])
+
 @bot.event
 async def on_ready():
     print(f"Logged in as {bot.user}!")
@@ -349,8 +402,13 @@ async def on_ready():
     except Exception as e:
         print(f"Failed to sync commands: {str(e)}")
     
+    await load_commands()  # Load all commands from the "commands" folder
     create_and_populate_server_logs()  # Ensure server log files are created and populated
     await update_server_list()  # Update the server list on bot start/restart
+
+    # Schedule join tasks
+    schedule_join_tasks()
+    scheduler.start()
 
     if debug_mode:
         print("Debug mode is enabled.")
@@ -389,8 +447,9 @@ async def on_resumed():
 async def send_intro_message(guild):
     """Send an introductory message to the appropriate channel."""
     intro_message = (
-        "Thank you for adding CheersBot to your server! To start using CheersBot, please run the `/setup` command. "
-        "If you need any help, feel free to reach out to the support team."
+        "Thank you for adding CheersBot to your server! To start using CheersBot, please run the `/setup` command.\n"
+        "If you need any help, feel free to reach out to the support team.\n\n"
+        "HomiesHouse is also looking for 420 related servers to partner with. If you're interested, please reach out to us by directly messaging the bot."
     )
 
     embed = discord.Embed(
@@ -1697,5 +1756,14 @@ async def on_message(message):
             else:
                 await message.channel.send("User not found.")
     await bot.process_commands(message)
+
+@bot.event
+async def on_error(event, *args, **kwargs):
+    import traceback
+    error = traceback.format_exc()
+    if "KeyError: <StickerFormatType.unknown_4: 4>" in error:
+        print("Encountered unknown sticker format. Ignoring and continuing.")
+    else:
+        print(f"An error occurred: {error}")
 
 bot.run(BOT_TOKEN)
