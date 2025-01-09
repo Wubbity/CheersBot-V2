@@ -787,12 +787,36 @@ async def feedback(interaction: discord.Interaction):
         await timeout_message.delete()
 
 # Auto-Join Task
+async def join_and_play_sound(guild):
+    """Join the most populated voice channel and play the configured sound."""
+    server_config = load_or_create_server_config(guild.id)
+    blacklist_channels = server_config.get("blacklist_channels", [])
+    
+    voice_channel = max(
+        (vc for vc in guild.voice_channels if len(vc.members) > 0 and vc.id not in blacklist_channels),
+        key=lambda vc: len(vc.members),
+        default=None
+    )
+    if voice_channel:
+        try:
+            vc = await voice_channel.connect(reconnect=True)
+            await asyncio.sleep(5)  # Wait 5 seconds before playing the sound
+            await play_sound_and_leave(guild, vc, bot.user)
+        except Exception as e:
+            print(f"Error during join and play in {voice_channel.name} on {guild.name}: {e}")
+    else:
+        if debug_mode:
+            print(f"No valid voice channels to join in {guild.name}. Skipping join action.")
+
 @tasks.loop(seconds=1)
 async def auto_join_task():
     """Check every second and trigger at X:15:00 UTC to join voice channels and X:20:00 to play sound."""
     now = datetime.now(timezone.utc)
     if debug_mode:
         print(f"Checking time: {now.strftime('%H:%M:%S')} UTC")  # Debug print to check current time
+
+    join_tasks = []
+    play_tasks = []
 
     for guild in bot.guilds:
         server_config = load_or_create_server_config(guild.id)
@@ -802,11 +826,11 @@ async def auto_join_task():
             if now.minute == 15 and now.second == 0:  # Trigger exactly at X:15:00
                 if debug_mode:
                     print(f"Triggering join_all_populated_voice_channels for {guild.name}")  # Debug print for join trigger
-                await join_all_populated_voice_channels(guild)
+                join_tasks.append(join_and_play_sound(guild))
             elif now.minute == 20 and now.second == 0:  # Trigger exactly at X:20:00
                 if debug_mode:
                     print(f"Triggering play_sound_in_all_channels for {guild.name}")  # Debug print for play sound trigger
-                await play_sound_in_all_channels(guild)
+                play_tasks.append(play_sound_in_all_channels(guild))
         elif join_frequency == 'timezones':
             join_timezones = server_config.get('join_timezones', [])
             for tz in join_timezones:
@@ -815,13 +839,16 @@ async def auto_join_task():
                 if tz_now.minute == 15 and tz_now.second == 0:
                     if debug_mode:
                         print(f"Triggering join_all_populated_voice_channels for {guild.name} in timezone {tz}")  # Debug print for join trigger
-                    await join_all_populated_voice_channels(guild)
+                    join_tasks.append(join_and_play_sound(guild))
                 elif tz_now.minute == 20 and tz_now.second == 0:
                     if debug_mode:
                         print(f"Triggering play_sound_in_all_channels for {guild.name} in timezone {tz}")  # Debug print for play sound trigger
-                    await play_sound_in_all_channels(guild)
+                    play_tasks.append(play_sound_in_all_channels(guild))
         elif join_frequency == 'manual':
             continue  # Skip auto-join for manual mode
+
+    await asyncio.gather(*join_tasks)
+    await asyncio.gather(*play_tasks)
 
 async def join_all_populated_voice_channels(guild):
     """Join the most populated voice channels in the specified guild."""
@@ -835,8 +862,7 @@ async def join_all_populated_voice_channels(guild):
     )
     if voice_channel:
         if guild.voice_client and guild.voice_client.is_connected():
-            print(f"Bot is already in a voice channel in {guild.name}. Playing sound...")
-            await play_sound_and_leave(guild, guild.voice_client, bot.user)
+            print(f"Bot is already in a voice channel in {guild.name}.")
         else:
             print(f"Scheduling join for {voice_channel.name} in {guild.name}...")
             await join_voice_channel(guild, voice_channel, bot.user)  # Join the voice channel
@@ -2080,9 +2106,69 @@ async def dm_unban(ctx):
     except asyncio.TimeoutError:
         await ctx.send('You took too long to respond. Please try again.')
 
+DM_GLOBAL_TOGGLE_PATH = os.path.join(SERVER_LOG_DIR, "DM_Global_Toggle.json")
+
+def load_dm_global_toggle():
+    if os.path.exists(DM_GLOBAL_TOGGLE_PATH):
+        with open(DM_GLOBAL_TOGGLE_PATH, 'r') as f:
+            return json.load(f)
+    return {"enabled": True, "reason": ""}
+
+def save_dm_global_toggle(dm_global_toggle):
+    with open(DM_GLOBAL_TOGGLE_PATH, 'w') as f:
+        json.dump(dm_global_toggle, f, indent=4)
+
+@bot.command(name='DM_toggle', aliases=['dm_toggle', 'Dm_toggle', 'dM_toggle'])
+async def dm_toggle(ctx):
+    """Toggle global DM enable/disable."""
+    with open(config_path, 'r') as f:
+        config = json.load(f)
+
+    if str(ctx.author.id) not in config['bot_developer_ids']:
+        await ctx.send('You do not have permission to use this command.')
+        return
+
+    dm_global_toggle = load_dm_global_toggle()
+    if dm_global_toggle["enabled"]:
+        await ctx.send('DMs are currently enabled. Do you want to disable them? (yes/no)')
+        def check(m):
+            return m.author == ctx.author and m.channel == ctx.channel
+
+        try:
+            msg = await bot.wait_for('message', check=check, timeout=30.0)
+            if msg.content.strip().lower() == 'yes':
+                await ctx.send('Please provide a reason for disabling DMs (type "none" for no reason):')
+                reason_msg = await bot.wait_for('message', check=check, timeout=30.0)
+                reason = reason_msg.content.strip()
+                if reason.lower() == "none":
+                    reason = ""
+                dm_global_toggle["enabled"] = False
+                dm_global_toggle["reason"] = reason
+                save_dm_global_toggle(dm_global_toggle)
+                await ctx.send(f'DMs have been disabled. Reason: {reason}')
+            else:
+                await ctx.send('DMs remain enabled.')
+        except asyncio.TimeoutError:
+            await ctx.send('You took too long to respond. Please try again.')
+    else:
+        dm_global_toggle["enabled"] = True
+        dm_global_toggle["reason"] = ""
+        save_dm_global_toggle(dm_global_toggle)
+        await ctx.send('DMs have been enabled.')
+
 @bot.event
 async def on_message(message):
     if message.guild is None and not message.author.bot:
+        dm_global_toggle = load_dm_global_toggle()
+        if not dm_global_toggle["enabled"]:
+            reason = dm_global_toggle["reason"]
+            embed = discord.Embed(
+                title="DMs Disabled",
+                description=f"DMs are currently disabled. Reason: {reason}" if reason else "DMs are currently disabled.",
+                color=discord.Color.red()
+            )
+            await message.author.send(embed=embed)
+            return
         dm_bans = load_dm_bans()
         if str(message.author.id) in dm_bans:
             reason = dm_bans[str(message.author.id)]
