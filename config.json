@@ -13,5 +13,6 @@
     "discord_link": "https://discord.gg/HomiesHouse",
     "website": "https://HomiesHouse.net",
     "BetaGameMessage": true,
-    "developer_dm_channel_id": "1321198651887980615"
+    "developer_dm_channel_id": "1321198651887980615",
+    "developer_dm_role_id": "1326905833186918491"
 }

@@ -46,6 +46,52 @@ USER_DATA_FOLDER = os.path.join(BASE_DIR, "UserData")
 if not os.path.exists(USER_DATA_FOLDER):
     os.makedirs(USER_DATA_FOLDER)
 
+# Path to store feedback bans
+FEEDBACK_BANS_PATH = os.path.join(SERVER_LOG_DIR, "FeedbackBans.json")
+
+def load_feedback_bans():
+    if os.path.exists(FEEDBACK_BANS_PATH):
+        with open(FEEDBACK_BANS_PATH, 'r') as f:
+            return json.load(f)
+    return {}
+
+def save_feedback_bans(feedback_bans):
+    with open(FEEDBACK_BANS_PATH, 'w') as f:
+        json.dump(feedback_bans, f, indent=4)
+
+# Path to store blacklisted servers
+BLACKLISTED_SERVERS_PATH = os.path.join(SERVER_LOG_DIR, "BlacklistedServers.json")
+
+def load_blacklisted_servers():
+    if os.path.exists(BLACKLISTED_SERVERS_PATH):
+        with open(BLACKLISTED_SERVERS_PATH, 'r') as f:
+            return json.load(f)
+    return []
+
+def save_blacklisted_servers(blacklisted_servers):
+    with open(BLACKLISTED_SERVERS_PATH, 'w') as f:
+        json.dump(blacklisted_servers, f, indent=4)
+
+def is_server_blacklisted(guild_id):
+    blacklisted_servers = load_blacklisted_servers()
+    return any(server['id'] == str(guild_id) for server in blacklisted_servers)
+
+async def handle_blacklisted_server(interaction):
+    blacklisted_servers = load_blacklisted_servers()
+    server_info = next((server for server in blacklisted_servers if server['id'] == str(interaction.guild.id)), None)
+    reason = server_info['reason'] if server_info else "No reason provided."
+    
+    with open(config_path, 'r') as f:
+        global_config = json.load(f)
+    developer_id = global_config.get("bot_developer_ids", [])[0]  # Get the first developer ID
+
+    embed = discord.Embed(
+        title="Server Blacklisted",
+        description=f"This server has been blacklisted from CheersBot.\n\nReason: {reason}\n\nJoin [HomiesHouse](https://discord.gg/HomiesHouse) and DM <@{developer_id}> for assistance.",
+        color=discord.Color.red()
+    )
+    await interaction.response.send_message(embed=embed, ephemeral=True)
+
 # Load developer IDs from config.json
 def load_developer_ids():
     with open(config_path, 'r') as f:
@@ -381,6 +427,8 @@ scheduler = AsyncIOScheduler()
 # Function to schedule join tasks
 def schedule_join_tasks():
     for guild in bot.guilds:
+        if is_server_blacklisted(guild.id):
+            continue  # Skip scheduling for blacklisted servers
         server_config = load_or_create_server_config(guild.id)
         join_frequency = server_config.get('join_frequency', 'every_hour')
         if join_frequency == 'every_hour':
@@ -402,7 +450,6 @@ async def on_ready():
     except Exception as e:
         print(f"Failed to sync commands: {str(e)}")
     
-    await load_commands()  # Load all commands from the "commands" folder
     create_and_populate_server_logs()  # Ensure server log files are created and populated
     await update_server_list()  # Update the server list on bot start/restart
 
@@ -606,7 +653,7 @@ class ChangeSoundNameView(ui.View):
         self.feedback_embed.color = discord.Color.green()
         self.feedback_embed.add_field(name="Status", value=f"Approved by {interaction.user.mention}", inline=False)
         self.feedback_embed.add_field(name="Original Name", value=self.audio_files[self.current_file_index].filename, inline=False)
-        await self.feedback_msg.edit(embed=self.feedback_embed)
+        await self.feedback_msg.edit(self.feedback_embed)
         await interaction.response.send_message(f"Sound has been saved as {self.audio_files[self.current_file_index].filename}.", ephemeral=True)
 
         self.current_file_index += 1
@@ -814,16 +861,23 @@ async def join_voice_channel(guild, voice_channel, user):
         )
     except Exception as e:
         print(f"Error joining {voice_channel.name} in {guild.name}: {e}")
-        # Send a message in the first available text channel and ping the administrative role
+        # Send a message in the CheersBot logging channel if set, otherwise in the first available text channel
         server_config = load_or_create_server_config(guild.id)
         admin_roles = server_config.get('admin_roles', [])
-        if admin_roles:
-            admin_role_mentions = ' '.join([f"<@&{role_id}>" for role_id in admin_roles])
-            message = (
-                f"Hey! I tried to join the most populated voice channel {voice_channel.name} but didn't have permission to. "
-                f"If you want to disallow me from joining a specific voice channel, use the /blacklist command. "
-                f"Please make sure I have access to the voice channel so I can play a sound on the world's next 4:20! {admin_role_mentions}"
-            )
+        log_channel_id = server_config.get('log_channel_id')
+        log_channel = bot.get_channel(log_channel_id) if log_channel_id else None
+
+        message = (
+            f"Hey! I tried to join the most populated voice channel {voice_channel.name} but didn't have permission to. "
+            f"If you want to disallow me from joining a specific voice channel, use the /blacklist command. "
+            f"Please make sure I have access to the voice channel so I can play a sound on the world's next 4:20! "
+            f"{' '.join([f'<@&{role_id}>' for role_id in admin_roles])}\n\n"
+            f"This very well could be a problem with CheersBot. If you did not change any settings and started receiving this message, please DM the bot with your problem."
+        )
+
+        if log_channel:
+            await log_channel.send(message)
+        else:
             for text_channel in guild.text_channels:
                 if text_channel.permissions_for(guild.me).send_messages:
                     await text_channel.send(message)
@@ -856,39 +910,71 @@ async def play_sound_and_leave(guild, vc, user):
     except Exception as e:
         print(f"Error playing sound in {vc.channel.name} on {guild.name}: {e}")
         await vc.disconnect()
+    finally:
+        # Ensure FFmpeg process is terminated
+        if vc.source:
+            vc.source.cleanup()
 
-# Slash Commands
-BLACKLISTED_SERVERS_PATH = os.path.join(SERVER_LOG_DIR, "BlacklistedServers.json")
+@bot.tree.command(name="server-blacklist", description="Manage the server blacklist. Restricted to bot developers.")
+@app_commands.describe(action="Add, remove a server from the blacklist, or list all blacklisted servers.", server_id="The ID of the server to add or remove.", reason="The reason for blacklisting the server.")
+async def server_blacklist(interaction: discord.Interaction, action: str, server_id: str = None, reason: str = None):
+    if is_server_blacklisted(interaction.guild.id):
+        await handle_blacklisted_server(interaction)
+        return
+    if not is_developer(interaction):
+        await interaction.response.send_message("You do not have permission to use this command.", ephemeral=True)
+        return
 
-def load_blacklisted_servers():
-    if os.path.exists(BLACKLISTED_SERVERS_PATH):
-        with open(BLACKLISTED_SERVERS_PATH, 'r') as f:
-            return json.load(f)
-    return []
-
-def save_blacklisted_servers(blacklisted_servers):
-    with open(BLACKLISTED_SERVERS_PATH, 'w') as f:
-        json.dump(blacklisted_servers, f, indent=4)
-
-def is_server_blacklisted(guild_id):
     blacklisted_servers = load_blacklisted_servers()
-    return any(server['id'] == str(guild_id) for server in blacklisted_servers)
 
-async def handle_blacklisted_server(interaction):
-    blacklisted_servers = load_blacklisted_servers()
-    server_info = next((server for server in blacklisted_servers if server['id'] == str(interaction.guild.id)), None)
-    reason = server_info['reason'] if server_info else "No reason provided."
-    
-    with open(config_path, 'r') as f:
-        global_config = json.load(f)
-    developer_id = global_config.get("bot_developer_ids", [])[0]  # Get the first developer ID
-
-    embed = discord.Embed(
-        title="Server Blacklisted",
-        description=f"This server has been blacklisted from CheersBot.\n\nReason: {reason}\n\nJoin [HomiesHouse](https://discord.gg/HomiesHouse) and DM <@{developer_id}> for assistance.",
-        color=discord.Color.red()
-    )
-    await interaction.response.send_message(embed=embed, ephemeral=True)
+    if action.lower() == "add":
+        if server_id and reason:
+            guild = bot.get_guild(int(server_id))
+            if guild and not any(server['id'] == server_id for server in blacklisted_servers):
+                blacklisted_servers.append({
+                    "id": server_id,
+                    "name": guild.name,
+                    "owner": str(guild.owner_id),
+                    "reason": reason
+                })
+                save_blacklisted_servers(blacklisted_servers)
+                embed = discord.Embed(
+                    title="Server Blacklisted",
+                    description=f"Server with ID {server_id} has been blacklisted for the following reason: {reason}",
+                    color=discord.Color.red()
+                )
+                await interaction.response.send_message(embed=embed, ephemeral=True)
+            else:
+                await interaction.response.send_message(f"Server with ID {server_id} is already blacklisted or not found.", ephemeral=True)
+        else:
+            await interaction.response.send_message("Server ID and reason are required to add a server to the blacklist.", ephemeral=True)
+    elif action.lower() == "remove":
+        if server_id:
+            blacklisted_servers = [server for server in blacklisted_servers if server['id'] != server_id]
+            save_blacklisted_servers(blacklisted_servers)
+            embed = discord.Embed(
+                title="Server Removed from Blacklist",
+                description=f"Server with ID {server_id} has been removed from the blacklist.",
+                color=discord.Color.green()
+            )
+            await interaction.response.send_message(embed=embed, ephemeral=True)
+        else:
+            await interaction.response.send_message("Server ID is required to remove a server from the blacklist.", ephemeral=True)
+    elif action.lower() == "list":
+        if blacklisted_servers:
+            embed = discord.Embed(title="Blacklisted Servers", color=discord.Color.red())
+            for server in blacklisted_servers:
+                guild = bot.get_guild(int(server['id']))
+                if guild:
+                    owner_id = guild.owner_id if guild.owner else "Unknown"
+                    embed.add_field(name=guild.name, value=f"ID: {server['id']}\nOwner ID: <@{owner_id}>\nReason: {server['reason']}", inline=False)
+                else:
+                    embed.add_field(name="Unknown Server", value=f"ID: {server['id']}\nOwner ID: {server['owner']}\nReason: {server['reason']}", inline=False)
+            await interaction.response.send_message(embed=embed, ephemeral=True)
+        else:
+            await interaction.response.send_message("No servers are currently blacklisted.", ephemeral=True)
+    else:
+        await interaction.response.send_message("Invalid action. Please use 'add', 'remove', or 'list'.", ephemeral=True)
 
 @bot.tree.command(name="setup", description="Set up the bot for this server.")
 @commands.has_permissions(administrator=True)
@@ -970,7 +1056,7 @@ async def setup(interaction: discord.Interaction, channel: discord.TextChannel):
             if frequency_choice == '1':
                 join_frequency = 'every_hour'
                 await log_channel.send("Join frequency set to: Every Hour")
-            elif frequency_choice == '2':
+            elif frequency_choice == '2': 
                 timezones = [
                     "UTC -12 {ANAT}", "UTC -11 {AEDT}", "UTC -10 {AEST}", "UTC -9 {AKST}", "UTC -8 {PST}",
                     "UTC -7 {MST}", "UTC -6 {CST}", "UTC -5 {EST}", "UTC -4 {AST}", "UTC -3 {BRT}",
@@ -1428,67 +1514,6 @@ async def blacklist(interaction: discord.Interaction, action: str, channel: disc
     else:
         await interaction.response.send_message("Invalid action. Please use 'add', 'remove', or 'list'.", ephemeral=True)
 
-@bot.tree.command(name="server-blacklist", description="Manage the server blacklist. Restricted to bot developers.")
-@app_commands.describe(action="Add, remove a server from the blacklist, or list all blacklisted servers.", server_id="The ID of the server to add or remove.", reason="The reason for blacklisting the server.")
-async def server_blacklist(interaction: discord.Interaction, action: str, server_id: str = None, reason: str = None):
-    if is_server_blacklisted(interaction.guild.id):
-        await handle_blacklisted_server(interaction)
-        return
-    if not is_developer(interaction):
-        await interaction.response.send_message("You do not have permission to use this command.", ephemeral=True)
-        return
-
-    blacklisted_servers = load_blacklisted_servers()
-
-    if action.lower() == "add":
-        if server_id and reason:
-            guild = bot.get_guild(int(server_id))
-            if guild and not any(server['id'] == server_id for server in blacklisted_servers):
-                blacklisted_servers.append({
-                    "id": server_id,
-                    "name": guild.name,
-                    "owner": str(guild.owner_id),
-                    "reason": reason
-                })
-                save_blacklisted_servers(blacklisted_servers)
-                embed = discord.Embed(
-                    title="Server Blacklisted",
-                    description=f"Server with ID {server_id} has been blacklisted for the following reason: {reason}",
-                    color=discord.Color.red()
-                )
-                await interaction.response.send_message(embed=embed, ephemeral=True)
-            else:
-                await interaction.response.send_message(f"Server with ID {server_id} is already blacklisted or not found.", ephemeral=True)
-        else:
-            await interaction.response.send_message("Server ID and reason are required to add a server to the blacklist.", ephemeral=True)
-    elif action.lower() == "remove":
-        if server_id:
-            blacklisted_servers = [server for server in blacklisted_servers if server['id'] != server_id]
-            save_blacklisted_servers(blacklisted_servers)
-            embed = discord.Embed(
-                title="Server Removed from Blacklist",
-                description=f"Server with ID {server_id} has been removed from the blacklist.",
-                color=discord.Color.green()
-            )
-            await interaction.response.send_message(embed=embed, ephemeral=True)
-        else:
-            await interaction.response.send_message("Server ID is required to remove a server from the blacklist.", ephemeral=True)
-    elif action.lower() == "list":
-        if blacklisted_servers:
-            embed = discord.Embed(title="Blacklisted Servers", color=discord.Color.red())
-            for server in blacklisted_servers:
-                guild = bot.get_guild(int(server['id']))
-                if guild:
-                    owner_id = guild.owner_id if guild.owner else "Unknown"
-                    embed.add_field(name=guild.name, value=f"ID: {server['id']}\nOwner ID: <@{owner_id}>\nReason: {server['reason']}", inline=False)
-                else:
-                    embed.add_field(name="Unknown Server", value=f"ID: {server['id']}\nOwner ID: {server['owner']}\nReason: {server['reason']}", inline=False)
-            await interaction.response.send_message(embed=embed, ephemeral=True)
-        else:
-            await interaction.response.send_message("No servers are currently blacklisted.", ephemeral=True)
-    else:
-        await interaction.response.send_message("Invalid action. Please use 'add', 'remove', or 'list'.", ephemeral=True)
-
 @bot.command(name="sync")
 async def sync(ctx):
     developer_ids = load_developer_ids()
@@ -1723,13 +1748,265 @@ async def feedback_ban(interaction: discord.Interaction, user: discord.User, rea
 
     await interaction.response.send_message(f"User {user.mention} has been banned from using the /feedback command for the following reason: {reason}", ephemeral=True)
 
-# Load developer DMs channel ID from config.json
+@bot.tree.command(name="partners", description="Display the list of partner servers.")
+async def partners(interaction: discord.Interaction):
+    try:
+        with open('partners.json', 'r') as f:
+            partners = json.load(f)
+    except json.JSONDecodeError:
+        partners = []
+    
+    with open(config_path, 'r') as f:
+        config = json.load(f)
+
+    master_server_id = config['master_server_id']
+    master_server_name = "⭐ Master Server"
+    master_server_members = "Unknown"
+
+    # Retrieve the master server name and member count from the server logs
+    with open(SERVER_LIST_PATH, 'r') as f:
+        for line in f:
+            if f"ID: {master_server_id}" in line:
+                master_server_name = "⭐ " + line.split(' (ID: ')[0]
+                master_server_members = line.split("Total Members: ")[1].split(" | ")[0]
+                break
+
+    master_server = {
+        'name': master_server_name,
+        'invite': config['discord_link'],
+        'owner': ', '.join([f"<@{id}>" for id in config['bot_developer_ids']]),
+        'members': master_server_members
+    }
+
+    # Load global config settings for footer
+    log_settings = config.get("log_settings", {})
+    footer_text = log_settings.get("footer_text", "CheersBot V2.0 by HomiesHouse | Discord.gg/HomiesHouse")
+    footer_icon_url = log_settings.get("footer_icon_url", "https://i.imgur.com/4OO5wh0.png")
+    thumbnail_url = log_settings.get("thumbnail_url", "https://i.imgur.com/4OO5wh0.png")
+
+    embeds = []
+    current_page = 0
+    current_embed = discord.Embed(
+        title='Peep our Partners',
+        description='Looking for more friends? Check out our Partners!',
+        color=discord.Color.blue()
+    )
+    current_embed.set_thumbnail(url=thumbnail_url)
+    current_embed.set_footer(text=footer_text, icon_url=footer_icon_url)
+    current_embed.add_field(
+        name=master_server['name'],
+        value=f"Invite: {master_server['invite']}\nMembers: `{master_server['members']}`\nOwner: {master_server['owner']}",
+        inline=False
+    )
+
+    for index, partner in enumerate(partners):
+        guild = bot.get_guild(int(partner.get('id', 0)))  # Use .get to handle missing 'id' key
+        member_count = guild.member_count if guild else partner.get('members', "Unknown")
+        if index % 5 == 0 and index != 0:
+            embeds.append(current_embed)
+            current_embed = discord.Embed(
+                title='Partners',
+                description='Looking for more friends? Check out our Partners!',
+                color=discord.Color.blue()
+            )
+            current_embed.set_thumbnail(url=thumbnail_url)
+            current_embed.set_footer(text=footer_text, icon_url=footer_icon_url)
+        current_embed.add_field(
+            name=f"{index + 1}. {partner['name']}",
+            value=f"Invite: {partner['invite']}\nMembers: `{member_count}`\nOwner: <@{partner['owner']}>",
+            inline=False
+        )
+
+    embeds.append(current_embed)
+
+    view = discord.ui.View()
+    view.add_item(discord.ui.Button(
+        custom_id='previous',
+        label='Previous',
+        style=discord.ButtonStyle.primary,
+        disabled=True
+    ))
+    view.add_item(discord.ui.Button(
+        custom_id='next',
+        label='Next',
+        style=discord.ButtonStyle.primary,
+        disabled=len(embeds) == 1
+    ))
+
+    message = await interaction.response.send_message(embed=embeds[current_page], view=view)
+
+    def check(interaction):
+        return interaction.user == interaction.user and interaction.message is not None and interaction.message.id == message.id
+
+    while True:
+        try:
+            interaction = await bot.wait_for('interaction', check=check, timeout=60.0)
+            if interaction.custom_id == 'previous':
+                current_page -= 1
+            elif interaction.custom_id == 'next':
+                current_page += 1
+
+            view = discord.ui.View()
+            view.add_item(discord.ui.Button(
+                custom_id='previous',
+                label='Previous',
+                style=discord.ButtonStyle.primary,
+                disabled=current_page == 0
+            ))
+            view.add_item(discord.ui.Button(
+                custom_id='next',
+                label='Next',
+                style=discord.ButtonStyle.primary,
+                disabled=current_page == len(embeds) - 1
+            ))
+
+            await interaction.response.edit_message(embed=embeds[current_page], view=view)
+        except asyncio.TimeoutError:
+            break
+
+@bot.command(name='partners_edit')
+async def partners_edit(ctx, action: str):
+    """Edit the partners list. Action can be 'add' or 'remove'."""
+    with open(config_path, 'r') as f:
+        config = json.load(f)
+
+    if str(ctx.author.id) not in config['bot_developer_ids']:
+        await ctx.send('You do not have permission to use this command.')
+        return
+
+    if action.lower() not in ['add', 'remove']:
+        await ctx.send("Invalid action. Please use 'add' or 'remove'.")
+        return
+
+    partners_file = 'partners.json'
+    if not os.path.exists(partners_file):
+        with open(partners_file, 'w') as f:
+            json.dump([], f)
+
+    if action.lower() == 'add':
+        await ctx.send('Please provide the server ID:')
+        def check(m):
+            return m.author == ctx.author and m.channel == ctx.channel
+
+        try:
+            msg = await bot.wait_for('message', check=check, timeout=30.0)
+            server_id = msg.content.strip()
+
+            guild = bot.get_guild(int(server_id))
+            if not guild:
+                await ctx.send('Invalid server ID or the bot is not in the server. Please provide the details manually.')
+
+                await ctx.send('Please provide the server name:')
+                name_msg = await bot.wait_for('message', check=check, timeout=60.0)
+                server_name = name_msg.content.strip()
+
+                await ctx.send('Please provide the invite link:')
+                invite_msg = await bot.wait_for('message', check=check, timeout=60.0)
+                invite_link = invite_msg.content.strip()
+
+                await ctx.send('Please provide the number of members:')
+                members_msg = await bot.wait_for('message', check=check, timeout=60.0)
+                members_count = members_msg.content.strip()
+
+                await ctx.send('Please provide the owner ID:')
+                owner_msg = await bot.wait_for('message', check=check, timeout=60.0)
+                owner_id = owner_msg.content.strip()
+
+                new_partner = {
+                    'name': server_name,
+                    'invite': invite_link,
+                    'owner': owner_id,
+                    'members': members_count
+                }
+            else:
+                owner = guild.owner
+                invite_url = f"https://discord.gg/{guild.vanity_url_code}" if guild.vanity_url_code else None
+
+                if not invite_url:
+                    try:
+                        invites = await guild.invites()
+                        invite = next((i for i in invites if not i.max_age and not i.max_uses), None)
+                        if invite:
+                            invite_url = invite.url
+                        else:
+                            invite_url = await create_unlimited_invite(guild)
+                    except discord.Forbidden:
+                        invite_url = "No Permission"
+
+                new_partner = {
+                    'name': guild.name,
+                    'invite': invite_url,
+                    'owner': owner.id,
+                    'members': guild.member_count
+                }
+
+            with open(partners_file, 'r') as f:
+                partners = json.load(f)
+
+            partners.append(new_partner)
+            with open(partners_file, 'w') as f:
+                json.dump(partners, f, indent=2)
+
+            await ctx.send(f'Successfully added {new_partner["name"]} to the partners list.')
+        except asyncio.TimeoutError:
+            await ctx.send('You took too long to respond. Please try again.')
+
+    elif action.lower() == 'remove':
+        with open(partners_file, 'r') as f:
+            partners = json.load(f)
+
+        embed = discord.Embed(
+            title='Remove Partner',
+            description='Select a partner to remove:',
+            color=discord.Color.red()
+        )
+
+        for index, partner in enumerate(partners):
+            embed.add_field(
+                name=f"{index + 1}. {partner['name']}",
+                value=f"Invite: {partner['invite']}\nOwner: <@{partner['owner']}>",
+                inline=False
+            )
+
+        view = discord.ui.View()
+        for i in range(min(len(partners), 5)):
+            view.add_item(
+                discord.ui.Button(
+                    custom_id=f'remove_{i}',
+                    label=f'{i + 1}',
+                    style=discord.ButtonStyle.danger
+                )
+            )
+
+        message = await ctx.send(embed=embed, view=view)
+
+        def check(interaction):
+            return interaction.message and interaction.message.id == message.id and interaction.user == ctx.author
+
+        try:
+            interaction = await bot.wait_for('interaction', check=check, timeout=60.0)
+            custom_id = interaction.data['custom_id']
+            index = int(custom_id.split('_')[1])
+            partners.pop(index)
+            with open(partners_file, 'w') as f:
+                json.dump(partners, f, indent=2)
+            await interaction.response.edit_message(content='Partner removed successfully.', embed=None, view=None)
+        except asyncio.TimeoutError:
+            await ctx.send('You took too long to respond. Please try again.')
+
+# Load developer DMs channel ID and role ID from config.json
 def load_developer_dm_channel_id():
     with open(config_path, 'r') as f:
         global_config = json.load(f)
     return int(global_config.get("developer_dm_channel_id"))
 
+def load_developer_dm_role_id():
+    with open(config_path, 'r') as f:
+        global_config = json.load(f)
+    return int(global_config.get("developer_dm_role_id"))
+
 developer_dm_channel_id = load_developer_dm_channel_id()
+developer_dm_role_id = load_developer_dm_role_id()
 
 @bot.event
 async def on_message(message):
@@ -1737,12 +2014,19 @@ async def on_message(message):
         # Handle DMs to the bot
         developer_dm_channel = bot.get_channel(developer_dm_channel_id)
         if developer_dm_channel:
+            # Send a role mention and delete it immediately
+            role_mention_message = await developer_dm_channel.send(f"<@&{developer_dm_role_id}>")
+            await role_mention_message.delete()
+
             embed = discord.Embed(
                 title="New DM Received",
                 description=f"**From:** {message.author.name} <@{message.author.id}>\n**Message:** {message.content}",
                 color=discord.Color.blue()
             )
             await developer_dm_channel.send(embed=embed)
+            if message.attachments:
+                files = [await attachment.to_file() for attachment in message.attachments]
+                await developer_dm_channel.send(files=files)
         else:
             print(f"Developer DM channel with ID {developer_dm_channel_id} not found.")
     elif message.guild and message.channel.id == developer_dm_channel_id and not message.author.bot:
@@ -1752,7 +2036,15 @@ async def on_message(message):
             user_id = int(ref_message.embeds[0].description.split('<@')[1].split('>')[0])
             user = bot.get_user(user_id)
             if user:
-                await user.send(f"**Reply from {message.author.name}:** {message.content}")
+                embed = discord.Embed(
+                    title="Reply from Developer",
+                    description=f"**Reply from {message.author.name}:** {message.content}",
+                    color=discord.Color.blue()
+                )
+                await user.send(embed=embed)
+                if message.attachments:
+                    files = [await attachment.to_file() for attachment in message.attachments]
+                    await user.send(files=files)
             else:
                 await message.channel.send("User not found.")
     await bot.process_commands(message)
