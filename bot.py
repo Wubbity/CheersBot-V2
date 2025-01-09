@@ -1864,6 +1864,8 @@ async def partners(interaction: discord.Interaction):
         except asyncio.TimeoutError:
             break
 
+
+
 @bot.command(name='partners_edit')
 async def partners_edit(ctx, action: str):
     """Edit the partners list. Action can be 'add' or 'remove'."""
@@ -2008,9 +2010,97 @@ def load_developer_dm_role_id():
 developer_dm_channel_id = load_developer_dm_channel_id()
 developer_dm_role_id = load_developer_dm_role_id()
 
+DM_BANS_PATH = os.path.join(SERVER_LOG_DIR, "DM_Bans.json")
+
+def load_dm_bans():
+    if os.path.exists(DM_BANS_PATH):
+        with open(DM_BANS_PATH, 'r') as f:
+            return json.load(f)
+    return {}
+
+def save_dm_bans(dm_bans):
+    with open(DM_BANS_PATH, 'w') as f:
+        json.dump(dm_bans, f, indent=4)
+
+@bot.command(name='DM_ban', aliases=['dm_ban', 'Dm_ban', 'dM_ban'])
+async def dm_ban(ctx):
+    """Ban a user from directly messaging the bot."""
+    with open(config_path, 'r') as f:
+        config = json.load(f)
+
+    if str(ctx.author.id) not in config['bot_developer_ids']:
+        await ctx.send('You do not have permission to use this command.')
+        return
+
+    await ctx.send('Please provide the user ID to ban:')
+    def check(m):
+        return m.author == ctx.author and m.channel == ctx.channel
+
+    try:
+        msg = await bot.wait_for('message', check=check, timeout=30.0)
+        user_id = msg.content.strip()
+
+        await ctx.send('Please provide the reason for the ban:')
+        reason_msg = await bot.wait_for('message', check=check, timeout=30.0)
+        reason = reason_msg.content.strip()
+
+        dm_bans = load_dm_bans()
+        dm_bans[user_id] = reason
+        save_dm_bans(dm_bans)
+
+        await ctx.send(f'User with ID {user_id} has been banned from directly messaging the bot for the following reason: {reason}')
+    except asyncio.TimeoutError:
+        await ctx.send('You took too long to respond. Please try again.')
+
+@bot.command(name='DM_unban', aliases=['dm_unban', 'Dm_unban', 'dM_unban'])
+async def dm_unban(ctx):
+    """Unban a user from directly messaging the bot."""
+    with open(config_path, 'r') as f:
+        config = json.load(f)
+
+    if str(ctx.author.id) not in config['bot_developer_ids']:
+        await ctx.send('You do not have permission to use this command.')
+        return
+
+    await ctx.send('Please provide the user ID to unban:')
+    def check(m):
+        return m.author == ctx.author and m.channel == ctx.channel
+
+    try:
+        msg = await bot.wait_for('message', check=check, timeout=30.0)
+        user_id = msg.content.strip()
+
+        dm_bans = load_dm_bans()
+        if user_id in dm_bans:
+            del dm_bans[user_id]
+            save_dm_bans(dm_bans)
+            await ctx.send(f'User with ID {user_id} has been unbanned from directly messaging the bot.')
+        else:
+            await ctx.send(f'User with ID {user_id} is not banned.')
+    except asyncio.TimeoutError:
+        await ctx.send('You took too long to respond. Please try again.')
+
 @bot.event
 async def on_message(message):
     if message.guild is None and not message.author.bot:
+        dm_bans = load_dm_bans()
+        if str(message.author.id) in dm_bans:
+            reason = dm_bans[str(message.author.id)]
+            with open(config_path, 'r') as f:
+                global_config = json.load(f)
+            footer_text = global_config.get("log_settings", {}).get("footer_text", "CheersBot V2.0 by HomiesHouse | Discord.gg/HomiesHouse")
+            footer_icon_url = global_config.get("log_settings", {}).get("footer_icon_url", "https://i.imgur.com/4OO5wh0.png")
+            thumbnail_url = global_config.get("log_settings", {}).get("thumbnail_url", "https://i.imgur.com/4OO5wh0.png")
+
+            embed = discord.Embed(
+                title="DM Ban",
+                description=f"You have been banned from directly messaging the bot for the following reason:\n{reason}",
+                color=discord.Color.red()
+            )
+            embed.set_thumbnail(url=thumbnail_url)
+            embed.set_footer(text=footer_text, icon_url=footer_icon_url)
+            await message.author.send(embed=embed)
+            return
         # Handle DMs to the bot
         developer_dm_channel = bot.get_channel(developer_dm_channel_id)
         if developer_dm_channel:
