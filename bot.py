@@ -1,21 +1,22 @@
 # CheersBot v2 - A Discord bot by Wubbity. Cheers!
 
-import discord
-from discord.ext import commands, tasks
-from discord import app_commands
 import os
 import json
-from dotenv import load_dotenv
-import random
-import asyncio
-from datetime import datetime, timedelta, timezone
-import pytz
 import platform
-from discord import ui, ButtonStyle, Interaction
+import asyncio
+import random
+import pytz
+import discord
 import math
-from discord.ext.commands import AutoShardedBot
 import importlib.util
+from discord.ext import commands, tasks
+from discord import app_commands, ui, ButtonStyle, Interaction
+from discord.ui import View, Button
+from discord.ext.commands import AutoShardedBot
 from apscheduler.schedulers.asyncio import AsyncIOScheduler
+from discord import app_commands
+from dotenv import load_dotenv
+from datetime import datetime, timedelta, timezone
 
 # Load environment variables
 load_dotenv()
@@ -139,6 +140,7 @@ def load_or_create_server_config(guild_id):
     config.setdefault("mode", "single")
     config.setdefault("default_sound", "Cheers_Bitch.mp3")
     config.setdefault("blacklist_channels", [])
+    config.setdefault("local_cheers_count", 0)
 
     return config
 
@@ -786,27 +788,102 @@ async def feedback(interaction: discord.Interaction):
         await asyncio.sleep(30)
         await timeout_message.delete()
 
+## Increment the manual smoke seshes count
+def increment_manual_smoke_seshes_count():
+    cheers_count = load_cheers_count()
+    cheers_count['manual_smoke_seshes'] = cheers_count.get('manual_smoke_seshes', 0) + 1
+    save_cheers_count(cheers_count)
+
+# Load cheers count data
+def load_cheers_count():
+    with open('cheers-count.json', 'r') as f:
+       return json.load(f)
+
+# Save cheers count data
+def save_cheers_count(data):
+    with open('cheers-count.json', 'w') as f:
+        json.dump(data, f, indent=4)
+
+# Increment the 420 somewhere count
+def increment_420_somewhere_count():
+    cheers_count = load_cheers_count()
+    cheers_count['its_420_somewhere_count'] = cheers_count.get('its_420_somewhere_count', 0) + 1
+    cheers_count['total_smoke_seshes_count'] = cheers_count['its_420_somewhere_count'] + cheers_count['manual_smoke_seshes_count']
+    save_cheers_count(cheers_count)
+
+# Increment the manual smoke seshes count
+def increment_manual_smoke_seshes_count():
+    cheers_count = load_cheers_count()
+    cheers_count['manual_smoke_seshes_count'] = cheers_count.get('manual_smoke_seshes_count', 0) + 1
+    cheers_count['total_smoke_seshes_count'] = cheers_count['its_420_somewhere_count'] + cheers_count['manual_smoke_seshes_count']
+    save_cheers_count(cheers_count)
+
+# Increment the play count for the sound
+def increment_sound_play_count(sound_name):
+    cheers_count = load_cheers_count()
+    cheers_count['sound_play_counts'][sound_name] = cheers_count['sound_play_counts'].get(sound_name, 0) + 1
+    save_cheers_count(cheers_count)
+
+# Increment the local cheers count
+def increment_local_cheers_count(guild_id):
+    server_config = load_or_create_server_config(guild_id)
+    server_config['local_cheers_count'] = server_config.get('local_cheers_count', 0) + 1
+    save_config(guild_id, server_config)
+
 # Auto-Join Task
-async def join_and_play_sound(guild):
-    """Join the most populated voice channel and play the configured sound."""
-    server_config = load_or_create_server_config(guild.id)
-    blacklist_channels = server_config.get("blacklist_channels", [])
-    
-    voice_channel = max(
-        (vc for vc in guild.voice_channels if len(vc.members) > 0 and vc.id not in blacklist_channels),
-        key=lambda vc: len(vc.members),
-        default=None
-    )
-    if voice_channel:
-        try:
-            vc = await voice_channel.connect(reconnect=True)
-            await asyncio.sleep(5)  # Wait 5 seconds before playing the sound
-            await play_sound_and_leave(guild, vc, bot.user)
-        except Exception as e:
-            print(f"Error during join and play in {voice_channel.name} on {guild.name}: {e}")
-    else:
-        if debug_mode:
-            print(f"No valid voice channels to join in {guild.name}. Skipping join action.")
+async def join_and_play_sound(guild, voice_channel, user):
+    """Join a specific voice channel, play the configured sound, and leave."""
+    vc = None
+    try:
+        vc = await voice_channel.connect(reconnect=True)
+        print(f"Joined {voice_channel.name} in {guild.name}.")
+        await log_action(
+            guild, "Joined Voice Channel",
+            f"Joined **{voice_channel.name}** at {datetime.now(timezone.utc).strftime('%H:%M:%S')} UTC.",
+            user  # Log with bot as the executing user
+        )
+
+        server_config = load_or_create_server_config(guild.id)
+        mode = server_config.get("mode", "single")
+        default_sound = server_config.get("default_sound", "Cheers_Bitch.mp3")
+        available_sounds = get_available_sounds()
+
+        if mode == "single":
+            sound_to_play = os.path.join(SOUND_FOLDER, default_sound)
+        else:
+            enabled_sounds = [s for s in available_sounds if server_config.get(f'sound_status_{s}', True)]
+            if not enabled_sounds:
+                enabled_sounds = available_sounds  # Fallback to all sounds if none are enabled
+            sound_to_play = os.path.join(SOUND_FOLDER, random.choice(enabled_sounds))
+
+        if vc.is_playing():
+            print(f"Already playing audio in {vc.channel.name} on {guild.name}.")
+            return
+
+        audio_source = discord.FFmpegPCMAudio(sound_to_play, executable=ffmpeg_path)
+        vc.play(audio_source)
+
+        # Increment the play count for the sound
+        cheers_count = load_cheers_count()
+        sound_name = os.path.basename(sound_to_play).replace('.mp3', '')
+        cheers_count['sound_play_counts'][sound_name] = cheers_count['sound_play_counts'].get(sound_name, 0) + 1
+        save_cheers_count(cheers_count)
+
+        # Increment the local cheers count
+        increment_local_cheers_count(guild.id)
+
+        while vc.is_playing():
+            await asyncio.sleep(1)
+        await log_action(guild, "Playing Sound", f"Played **{os.path.basename(sound_to_play)}** at {datetime.now(timezone.utc).strftime('%H:%M:%S')} UTC.", user)
+        await asyncio.sleep(2)  # 2-second delay after the sound has finished playing
+    except Exception as e:
+        print(f"Error playing sound in {vc.channel.name} on {guild.name}: {e}")
+    finally:
+        if vc:
+            await vc.disconnect()
+            await log_action(guild, "Left Voice Channel", f"Disconnected from **{vc.channel.name}** at {datetime.now(timezone.utc).strftime('%H:%M:%S')} UTC.", user)
+        if audio_source:
+            audio_source.cleanup()
 
 @tasks.loop(seconds=1)
 async def auto_join_task():
@@ -826,11 +903,12 @@ async def auto_join_task():
             if now.minute == 15 and now.second == 0:  # Trigger exactly at X:15:00
                 if debug_mode:
                     print(f"Triggering join_all_populated_voice_channels for {guild.name}")  # Debug print for join trigger
-                join_tasks.append(join_and_play_sound(guild))
+                join_tasks.append(join_all_populated_voice_channels(guild))
             elif now.minute == 20 and now.second == 0:  # Trigger exactly at X:20:00
                 if debug_mode:
                     print(f"Triggering play_sound_in_all_channels for {guild.name}")  # Debug print for play sound trigger
                 play_tasks.append(play_sound_in_all_channels(guild))
+                increment_420_somewhere_count()  # Increment the 420 somewhere count
         elif join_frequency == 'timezones':
             join_timezones = server_config.get('join_timezones', [])
             for tz in join_timezones:
@@ -839,11 +917,12 @@ async def auto_join_task():
                 if tz_now.minute == 15 and tz_now.second == 0:
                     if debug_mode:
                         print(f"Triggering join_all_populated_voice_channels for {guild.name} in timezone {tz}")  # Debug print for join trigger
-                    join_tasks.append(join_and_play_sound(guild))
+                    join_tasks.append(join_all_populated_voice_channels(guild))
                 elif tz_now.minute == 20 and tz_now.second == 0:
                     if debug_mode:
                         print(f"Triggering play_sound_in_all_channels for {guild.name} in timezone {tz}")  # Debug print for play sound trigger
                     play_tasks.append(play_sound_in_all_channels(guild))
+                    increment_420_somewhere_count()  # Increment the 420 somewhere count
         elif join_frequency == 'manual':
             continue  # Skip auto-join for manual mode
 
@@ -925,21 +1004,33 @@ async def play_sound_and_leave(guild, vc, user):
         sound_to_play = os.path.join(SOUND_FOLDER, random.choice(enabled_sounds))
 
     try:
-        vc.play(discord.FFmpegPCMAudio(sound_to_play, executable=ffmpeg_path))
+        if vc.is_playing():
+            print(f"Already playing audio in {vc.channel.name} on {guild.name}.")
+            return
+
+        audio_source = discord.FFmpegPCMAudio(sound_to_play, executable=ffmpeg_path)
+        vc.play(audio_source)
+
+        # Increment the play count for the sound
+        sound_name = os.path.basename(sound_to_play).replace('.mp3', '')
+        increment_sound_play_count(sound_name)
+
+        # Increment the local cheers count
+        increment_local_cheers_count(guild.id)
+
         while vc.is_playing():
             await asyncio.sleep(1)
         await log_action(guild, "Playing Sound", f"Played **{os.path.basename(sound_to_play)}** at {datetime.now(timezone.utc).strftime('%H:%M:%S')} UTC.", user)
         
         await asyncio.sleep(2)  # 2-second delay after the sound has finished playing
-        await vc.disconnect()
-        await log_action(guild, "Left Voice Channel", f"Disconnected from **{vc.channel.name}** at {datetime.now(timezone.utc).strftime('%H:%M:%S')} UTC.", user)
     except Exception as e:
         print(f"Error playing sound in {vc.channel.name} on {guild.name}: {e}")
-        await vc.disconnect()
     finally:
-        # Ensure FFmpeg process is terminated
-        if vc.source:
-            vc.source.cleanup()
+        if vc:
+            await vc.disconnect()
+            await log_action(guild, "Left Voice Channel", f"Disconnected from **{vc.channel.name}** at {datetime.now(timezone.utc).strftime('%H:%M:%S')} UTC.", user)
+        if audio_source:
+            audio_source.cleanup()
 
 @bot.tree.command(name="server-blacklist", description="Manage the server blacklist. Restricted to bot developers.")
 @app_commands.describe(action="Add, remove a server from the blacklist, or list all blacklisted servers.", server_id="The ID of the server to add or remove.", reason="The reason for blacklisting the server.")
@@ -1336,8 +1427,11 @@ async def sounds(interaction: discord.Interaction):
     mode = server_config.get('mode', 'single')
     available_sounds = get_available_sounds()
 
+    # Strip the .mp3 extension from the sound file names
+    available_sounds = [sound.replace('.mp3', '') for sound in available_sounds]
+
     if mode == 'single':
-        default_sound = server_config.get('default_sound', 'Cheers_Bitch.mp3')
+        default_sound = server_config.get('default_sound', 'Cheers_Bitch.mp3').replace('.mp3', '')
         await interaction.response.send_message(f"The current sound is: {default_sound}", ephemeral=True)
     else:
         if not available_sounds:
@@ -1387,7 +1481,7 @@ async def reload(interaction: discord.Interaction):
 
     await interaction.response.defer(ephemeral=True)
     try:
-        # Reload commands globally
+        # Sync commands globally
         await bot.tree.sync()
         await interaction.followup.send("Commands reloaded globally.", ephemeral=True)
     except Exception as e:
@@ -1437,24 +1531,6 @@ async def cheers(interaction: discord.Interaction, channel: discord.VoiceChannel
         return
     if not await ensure_setup(interaction):
         return
-    server_config = load_or_create_server_config(interaction.guild.id)
-    admin_roles = server_config.get('admin_roles', [])
-    
-    # Load bot developer IDs from config.json
-    with open(config_path, 'r') as f:
-        global_config = json.load(f)
-    developer_ids = global_config.get("bot_developer_ids", [])
-
-    # Check if the user has permission to use the command
-    if not (
-        interaction.user.guild_permissions.administrator
-        or any(role.id in admin_roles for role in interaction.user.roles)
-        or str(interaction.user.id) in developer_ids
-    ):
-        await interaction.response.send_message(
-            "You do not have permission to use this command.", ephemeral=True
-        )
-        return
 
     try:
         await interaction.response.defer(ephemeral=True)  # Defer the interaction response
@@ -1468,6 +1544,8 @@ async def cheers(interaction: discord.Interaction, channel: discord.VoiceChannel
 
         # Play the sound based on the server's mode
         await play_sound_and_leave(interaction.guild, vc, interaction.user)
+        
+        increment_manual_smoke_seshes_count()  # Increment the manual smoke seshes count
     except Exception as e:
         if not interaction.response.is_done():
             await interaction.followup.send(f"Failed to join: {e}", ephemeral=True)
@@ -1810,6 +1888,21 @@ async def partners(interaction: discord.Interaction):
     footer_icon_url = log_settings.get("footer_icon_url", "https://i.imgur.com/4OO5wh0.png")
     thumbnail_url = log_settings.get("thumbnail_url", "https://i.imgur.com/4OO5wh0.png")
 
+    # Update member counts dynamically
+    for partner in partners:
+        guild = bot.get_guild(int(partner.get('id', 0)))  # Use .get to handle missing 'id' key
+        if guild:
+            partner['members'] = guild.member_count
+        elif 'members' not in partner:
+            partner['members'] = "Unknown"
+
+    # Sort partners by member count, highest to lowest
+    partners.sort(key=lambda x: int(str(x['members'])) if str(x['members']).isdigit() else 0, reverse=True)
+
+    # Save the updated partners list
+    with open('partners.json', 'w') as f:
+        json.dump(partners, f, indent=2)
+
     embeds = []
     current_page = 0
     current_embed = discord.Embed(
@@ -1826,8 +1919,7 @@ async def partners(interaction: discord.Interaction):
     )
 
     for index, partner in enumerate(partners):
-        guild = bot.get_guild(int(partner.get('id', 0)))  # Use .get to handle missing 'id' key
-        member_count = guild.member_count if guild else partner.get('members', "Unknown")
+        member_count = partner.get('members', "Unknown")
         if index % 5 == 0 and index != 0:
             embeds.append(current_embed)
             current_embed = discord.Embed(
@@ -1862,7 +1954,7 @@ async def partners(interaction: discord.Interaction):
     message = await interaction.response.send_message(embed=embeds[current_page], view=view)
 
     def check(interaction):
-        return interaction.user == interaction.user and interaction.message is not None and interaction.message.id == message.id
+        return interaction.message and interaction.message.id == message.id and interaction.user == interaction.user
 
     while True:
         try:
@@ -1889,8 +1981,6 @@ async def partners(interaction: discord.Interaction):
             await interaction.response.edit_message(embed=embeds[current_page], view=view)
         except asyncio.TimeoutError:
             break
-
-
 
 @bot.command(name='partners_edit')
 async def partners_edit(ctx, action: str):
@@ -1965,13 +2055,15 @@ async def partners_edit(ctx, action: str):
                     'name': guild.name,
                     'invite': invite_url,
                     'owner': owner.id,
-                    'members': guild.member_count
+                    'members': guild.member_count,
+                    'id': str(guild.id)  # Ensure the 'id' key is included
                 }
 
             with open(partners_file, 'r') as f:
                 partners = json.load(f)
 
             partners.append(new_partner)
+            partners.sort(key=lambda x: int(str(x['members'])) if str(x['members']).isdigit() else 0, reverse=True)
             with open(partners_file, 'w') as f:
                 json.dump(partners, f, indent=2)
 
@@ -2016,11 +2108,108 @@ async def partners_edit(ctx, action: str):
             custom_id = interaction.data['custom_id']
             index = int(custom_id.split('_')[1])
             partners.pop(index)
+            partners.sort(key=lambda x: int(str(x['members'])) if str(x['members']).isdigit() else 0, reverse=True)
             with open(partners_file, 'w') as f:
                 json.dump(partners, f, indent=2)
             await interaction.response.edit_message(content='Partner removed successfully.', embed=None, view=None)
         except asyncio.TimeoutError:
             await ctx.send('You took too long to respond. Please try again.')
+
+    # Update member counts dynamically
+    with open(partners_file, 'r') as f:
+        partners = json.load(f)
+
+    for partner in partners:
+        if 'id' in partner:
+            guild = bot.get_guild(int(partner['id']))
+            if guild:
+                partner['members'] = guild.member_count
+            elif 'members' not in partner:
+                partner['members'] = "Unknown"
+
+    partners.sort(key=lambda x: int(str(x['members'])) if str(x['members']).isdigit() else 0, reverse=True)
+    with open(partners_file, 'w') as f:
+        json.dump(partners, f, indent=2)
+
+    await ctx.send('Partners list updated with current member counts.')
+
+CHEERS_COUNT_FILE = 'cheers-count.json'
+
+# Load cheers count data
+def load_cheers_count():
+    with open('cheers-count.json', 'r') as f:
+        return json.load(f)
+
+# Save cheers count data
+def save_cheers_count(data):
+    with open('cheers-count.json', 'w') as f:
+        json.dump(data, f, indent=4)
+
+class CheersCountView(View):
+    def __init__(self, seshes_disabled=False, sounds_disabled=False, local_disabled=False):
+        super().__init__(timeout=None)
+        self.add_item(Button(label="Seshes", style=discord.ButtonStyle.primary, custom_id="seshes_button", disabled=seshes_disabled))
+        self.add_item(Button(label="Specific Sounds", style=discord.ButtonStyle.primary, custom_id="specific_sounds_button", disabled=sounds_disabled))
+        self.add_item(Button(label="Local", style=discord.ButtonStyle.primary, custom_id="local_button", disabled=local_disabled))
+
+@bot.tree.command(name="cheers-count", description="Show the count of each sound played.")
+async def cheers_count(interaction: discord.Interaction):
+    cheers_count = load_cheers_count()
+    its_420_somewhere_count = cheers_count.get("its_420_somewhere_count", 0)
+    manual_smoke_seshes_count = cheers_count.get("manual_smoke_seshes_count", 0)
+    total_smoke_seshes_count = cheers_count.get("total_smoke_seshes_count", 0)
+
+    embed = discord.Embed(title="Seshes Count", color=discord.Color.green())
+    embed.add_field(name="It's 4:20 Somewhere!", value=f"`{its_420_somewhere_count}` times", inline=False)
+    embed.add_field(name="Manual Smoke Seshes Count", value=f"`{manual_smoke_seshes_count}` times", inline=False)
+    embed.add_field(name="Total Smoke Seshes Count", value=f"`{total_smoke_seshes_count}` times", inline=False)
+
+    view = CheersCountView(seshes_disabled=True)
+    await interaction.response.send_message(embed=embed, view=view)
+
+@bot.event
+async def on_interaction(interaction: discord.Interaction):
+    if interaction.type == discord.InteractionType.component:
+        cheers_count = load_cheers_count()
+        if interaction.data["custom_id"] == "seshes_button":
+            its_420_somewhere_count = cheers_count.get("its_420_somewhere_count", 0)
+            manual_smoke_seshes_count = cheers_count.get("manual_smoke_seshes_count", 0)
+            total_smoke_seshes_count = cheers_count.get("total_smoke_seshes_count", 0)
+
+            embed = discord.Embed(title="Seshes Count", color=discord.Color.green())
+            embed.add_field(name="420 Somewhere Count", value=f"`{its_420_somewhere_count}` times", inline=False)
+            embed.add_field(name="Manual Smoke Seshes Count", value=f"`{manual_smoke_seshes_count}` times", inline=False)
+            embed.add_field(name="Total Smoke Seshes Count", value=f"`{total_smoke_seshes_count}` times", inline=False)
+
+            view = CheersCountView(seshes_disabled=True)
+            await interaction.response.edit_message(embed=embed, view=view)
+
+        elif interaction.data["custom_id"] == "specific_sounds_button":
+            sound_play_counts = cheers_count.get('sound_play_counts', {})
+
+            if not sound_play_counts:
+                await interaction.response.edit_message(content="No sounds have been played yet.", embed=None, view=None)
+                return
+
+            embed = discord.Embed(title="Cheers Sound Play Counts", color=discord.Color.blue())
+            for sound, count in sound_play_counts.items():
+                embed.add_field(name=sound, value=f"`{count}` times", inline=False)
+
+            view = CheersCountView(sounds_disabled=True)
+            await interaction.response.edit_message(embed=embed, view=view)
+
+        elif interaction.data["custom_id"] == "local_button":
+            server_config = load_or_create_server_config(interaction.guild.id)
+            local_cheers_count = server_config.get("local_cheers_count", 0)
+
+            embed = discord.Embed(
+                title=f"{interaction.guild.name} - Cheers Count",
+                description=f"Cheers bot has said Cheers in {interaction.guild.name} `{local_cheers_count}` times.",
+                color=discord.Color.blue()
+            )
+
+            view = CheersCountView(local_disabled=True)
+            await interaction.response.edit_message(embed=embed, view=view)
 
 # Load developer DMs channel ID and role ID from config.json
 def load_developer_dm_channel_id():
