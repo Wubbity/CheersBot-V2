@@ -953,6 +953,7 @@ async def play_sound_in_all_channels(guild):
     """Play the configured sound in all voice channels where the bot is connected in the specified guild."""
     if guild.voice_client and guild.voice_client.is_connected():
         await play_sound_and_leave(guild, guild.voice_client, bot.user)  # Play sound and leave the voice channel
+        increment_420_somewhere_count()  # Increment the 420 somewhere count for each server
 
 async def join_voice_channel(guild, voice_channel, user):
     """Join a specific voice channel in a guild and log the action."""
