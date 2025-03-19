@@ -8,296 +8,311 @@ The Public Version of CheersBot - A complete rewrite!
 - [Features](#features)
 - [Commands](#commands)
   - [/setup](#setup)
-  - [/join](#join)
-  - [/leave](#leave)
   - [/sounds](#sounds)
   - [/mode](#mode)
   - [/setup-info](#setup-info)
   - [/cheers](#cheers)
   - [/blacklist](#blacklist)
-  - [/usersettings](#usersettings)
-- [420Game Commands](#420game-commands)
-  - [/start](#start)
-  - [/profile](#profile)
-  - [/roll](#roll)
-  - [/sell](#sell)
-  - [/upgrade_rolling_skill](#upgrade_rolling_skill)
-  - [/upgrade_trap_house](#upgrade_trap_house)
-  - [/daily](#daily)
-  - [/balance](#balance)
-  - [/shop](#shop)
-  - [/buy_upgrade](#buy_upgrade)
-  - [/upgrades](#upgrades)
-  - [/leaderboard](#leaderboard)
-  - [/rename](#rename)
-  - [/inventory](#inventory)
+  - [/permissions](#permissions)
+  - [/cheers-count](#cheers-count)
+  - [/meetthedev](#meetthedev)
+  - [/partners](#partners)
+  - [/feedback](#feedback)
+- [Developer Commands](#developer-commands)
+  - [/server-blacklist](#server-blacklist)
+  - [/feedback-ban](#feedback-ban)
+  - [/reload](#reload)
+  - [/update](#update)
+  - [/test](#test)
+  - [c.sync](#csync)
+  - [partners_edit](#partners_edit)
+  - [DM_ban](#dm_ban)
+  - [DM_unban](#dm_unban)
+  - [DM_toggle](#dm_toggle)
 - [Configuration](#configuration)
 - [Logging](#logging)
 - [Developer Information](#developer-information)
-  - [/meetthedev](#meetthedev)
-- [Developer Only](#developer-only)
-  - [/reset_game_data](#reset_game_data)
-  - [/maintenance](#maintenance)
-  - [/server-blacklist](#server-blacklist)
-  - [/update](#update)
-  - [/reload](#reload)
+- [Installation](#installation)
+- [Contributing](#contributing)
+- [Support](#support)
 
 ## Introduction
 
-CheersBot V2 is a Discord bot designed to enhance your server with fun and useful features. It includes functionalities like playing sounds in voice channels, logging actions, and more.
+CheersBot V2 is a Discord bot designed to bring fun and utility to your server. It can join voice channels to play sounds, manage server-specific configurations, log actions, and provide detailed feedback mechanisms. Built with Python and the Discord.py library, it’s highly customizable and packed with features for both users and developers.
 
 ## Features
 
-- Join and leave voice channels.
-- Play sounds in voice channels at specified times.
-- Configure bot settings per server.
-- Log actions to a specified channel.
-- Admin role management.
-- Manage blacklist of channels for auto-join.
-- 420Game with various commands to roll, sell, upgrade, and manage your profile.
-  - Daily check-in bonuses.
-  - View and purchase upgrades from the shop.
-  - View game leaderboards.
-  - Rename your trap house.
-  - View your purchased items and their total income per hour.
-- Send feedback/images/audio to developers to be used to further development of CheersBot.
-- Manage server blacklist (Developer only).
-- Toggle maintenance mode (Developer only).
-- Send update messages to all servers (Developer only).
-- Reload commands globally (Developer only).
+- Automatically joins voice channels and plays sounds at configurable times (e.g., every hour at X:15 or at 4:20 in specified timezones).
+- Supports two sound modes: `single` (plays a default sound) or `random` (selects from enabled sounds).
+- Configurable server settings, including log channels, admin roles, and blacklisted channels.
+- Detailed logging system with server lists and action logs.
+- Feedback system allowing users to submit text, images, and audio files to developers.
+- Blacklist management for servers and channels.
+- Partner server showcase with dynamic member counts.
+- Developer tools for testing, updating, and managing the bot across all servers.
+- Direct message (DM) handling with ban and toggle options.
+- Permissions checker to ensure proper bot setup.
+- Cheers count tracking (global and local).
 
 ## Commands
 
 ### /setup
 
-**Description**: Set up the bot for this server.
+**Description**: Initializes the bot for your server by setting up logging and admin roles.
 
 **Usage**: `/setup channel:<TextChannel>`
 
 **Permissions**: Administrator
 
 **Steps**:
-1. Set the logging channel.
-2. Provide admin role IDs.
-3. Choose the bot mode (`single` or `random`).
-
-### /join
-
-**Description**: Make the bot join a voice channel.
-
-**Usage**: `/join channel:<VoiceChannel>`
-
-### /leave
-
-**Description**: Make the bot leave the voice channel.
-
-**Usage**: `/leave`
+1. Specify a text channel for logging bot actions.
+2. Assign admin roles for managing bot settings.
 
 ### /sounds
 
-**Description**: Enable or disable available sounds for this server.
+**Description**: Manage available sounds for the server. In `random` mode, enable/disable sounds; in `single` mode, view the default sound.
 
 **Usage**: `/sounds`
 
 ### /mode
 
-**Description**: Change the bot's mode for this server.
+**Description**: Switch between `single` (one default sound) and `random` (randomly selected enabled sounds) modes.
 
 **Usage**: `/mode mode:<single|random>`
 
 **Permissions**: Administrator
 
-### /reload
-
-**Description**: Reload commands for this server.
-
-**Usage**: `/reload`
-
 ### /setup-info
 
-**Description**: Display the current bot settings for this server.
+**Description**: Displays the current bot configuration for the server, including log channel, admin roles, mode, and join frequency.
 
 **Usage**: `/setup-info`
 
 ### /cheers
 
-**Description**: Play the cheers sound in a voice channel.
+**Description**: Manually triggers the bot to join a specified voice channel and play a sound.
 
 **Usage**: `/cheers channel:<VoiceChannel>`
 
 ### /blacklist
 
-**Description**: Manage the blacklist of channels for auto-join.
+**Description**: Manage a list of voice channels the bot won’t auto-join.
 
 **Usage**: `/blacklist action:<add|remove|list> channel:<VoiceChannel>`
 
-### /usersettings
+**Permissions**: Administrator
 
-**Description**: Configure your payment settings.
+### /permissions
 
-**Usage**: `/usersettings`
+**Description**: Checks the bot’s permissions in the server and highlights missing ones.
 
-## 420Game Commands
+**Usage**: `/permissions`
 
-### /start
+### /cheers-count
 
-**Description**: Start the game and create your profile. All other game commands require /start to be ran before using them for the first time.
+**Description**: Shows the total number of cheers played globally and locally, including breakdowns for automated and manual triggers, and sound-specific counts.
 
-**Usage**: `/start`
+**Usage**: `/cheers-count`
 
-### /profile
+### /meetthedev
 
-**Description**: View your game profile.
+**Description**: Provides information about the bot’s developers and links to their Discord and website.
 
-**Usage**: `/profile`
+**Usage**: `/meetthedev`
 
-### /roll
+### /partners
 
-**Description**: Roll some J's.
+**Description**: Lists partner servers with invite links, member counts, and owner details.
 
-**Usage**: `/roll`
+**Usage**: `/partners`
 
-### /sell
+### /feedback
 
-**Description**: Sell your J's.
+**Description**: Allows users to send feedback, images, or audio files (.mp3, .m4a, .wav, .ogg) to developers for review.
 
-**Usage**: `/sell`
+**Usage**: `/feedback`
 
-### /upgrade_rolling_skill
+## Developer Commands
 
-**Description**: Upgrade your rolling skill.
+These commands are restricted to developers listed in `config.json`.
 
-**Usage**: `/upgrade_rolling_skill`
+### /server-blacklist
 
-### /upgrade_trap_house
+**Description**: Manages the server blacklist (add, remove, or list).
 
-**Description**: Upgrade your trap house.
+**Usage**: `/server-blacklist action:<add|remove|list> server_id:<ServerID> reason:<Reason>`
 
-**Usage**: `/upgrade_trap_house`
+### /feedback-ban
 
-### /daily
+**Description**: Bans a user from using the `/feedback` command.
 
-**Description**: Claim your daily check-in bonus.
+**Usage**: `/feedback-ban user:<User> reason:<Reason>`
 
-**Usage**: `/daily`
+### /reload
 
-### /balance
+**Description**: Reloads and syncs all commands globally.
 
-**Description**: Show your current balance.
+**Usage**: `/reload`
 
-**Usage**: `/balance`
+### /update
 
-### /shop
+**Description**: Sends an update message to a specific server or all servers.
 
-**Description**: View available upgrades in the shop.
+**Usage**: `/update server_id:<ServerID>`
 
-**Usage**: `/shop`
+### /test
 
-### /buy_upgrade
+**Description**: Manually triggers the bot to join and play sounds in all servers’ most populated voice channels for testing.
 
-**Description**: Buy an upgrade from the shop.
+**Usage**: `/test`
 
-**Usage**: `/buy_upgrade upgrade_name:<UpgradeName>`
+### c.sync
 
-### /upgrades
+**Description**: Syncs commands globally and updates the server list.
 
-**Description**: View and purchase available upgrades.
+**Usage**: `c.sync`
 
-**Usage**: `/upgrades`
+**Prefix**: `c.`
 
-### /leaderboard
+### partners_edit
 
-**Description**: View the game leaderboard.
+**Description**: Adds or removes servers from the partners list.
 
-**Usage**: `/leaderboard`
+**Usage**: `c.partners_edit action:<add|remove>`
 
-### /rename
+**Prefix**: `c.`
 
-**Description**: Rename your trap house.
+### DM_ban
 
-**Usage**: `/rename new_name:<NewName>`
+**Description**: Bans a user from sending DMs to the bot.
 
-### /inventory
+**Usage**: `c.DM_ban`
 
-**Description**: View your purchased items and their total income per hour.
+**Prefix**: `c.`
 
-**Usage**: `/inventory`
+### DM_unban
+
+**Description**: Unbans a user from sending DMs to the bot.
+
+**Usage**: `c.DM_unban`
+
+**Prefix**: `c.`
+
+### DM_toggle
+
+**Description**: Toggles DM functionality globally with an optional reason.
+
+**Usage**: `c.DM_toggle`
+
+**Prefix**: `c.`
 
 ## Configuration
 
-The bot uses a configuration file (`config.json`) to store global settings. Here is an example configuration:
+CheersBot uses a global `config.json` file and server-specific `config_<guild_id>.json` files. Below is an example of each:
+
+### Global Config (`config.json`)
 
 ```json
 {
-    "bot_developer_ids": [
-        "YOUR_DEVELOPER_ID_1",
-        "YOUR_DEVELOPER_ID_2"
-    ],
+    "bot_developer_ids": ["171091643510816768"],
+    "master_server_id": "YOUR_MASTER_SERVER_ID",
+    "developer_dm_channel_id": "1315133468337770578",
+    "developer_dm_role_id": "YOUR_ROLE_ID",
+    "discord_link": "https://discord.gg/HomiesHouse",
+    "website": "https://HomiesHouse.net",
     "log_settings": {
         "footer_text": "CheersBot V2.0 by HomiesHouse | Discord.gg/HomiesHouse",
         "footer_icon_url": "https://i.imgur.com/4OO5wh0.png",
         "thumbnail_url": "https://i.imgur.com/4OO5wh0.png"
     },
-    "default_sound": "YOUR_CHEERS_SOUND.mp3",
-    "debug": true,
-    "master_server_id": "YOUR_MASTER_SERVER_ID"
+    "debug": true
 }
 ```
 
-Ensure you replace placeholders like `YOUR_DEVELOPER_ID_1`, `YOUR_DEVELOPER_ID_2`, `YOUR_CHEERS_SOUND.mp3` and `YOUR_MASTER_SERVER_ID` with your actual IDs.
+### Server Config (`config_<guild_id>.json`)
+
+```json
+{
+    "log_channel_id": 801086900403306527,
+    "admin_roles": [329836453561630720],
+    "mode": "random",
+    "default_sound": "cheers_bitch.mp3",
+    "blacklist_channels": [],
+    "local_cheers_count": 42,
+    "join_frequency": "every_hour",
+    "join_timezones": []
+}
+```
+
+- Replace placeholders like `YOUR_MASTER_SERVER_ID` and `YOUR_ROLE_ID` with actual values.
+- Environment variables (e.g., `DISCORD_BOT_TOKEN`, `MASTER_GUILD_ID`) are loaded via a `.env` file.
 
 ## Logging
 
-The bot logs actions to a specified channel and maintains server logs in the `server_logs` directory. The logs include:
+CheersBot maintains detailed logs in the `server_logs` directory:
 
-- `ServerList.log`: List of servers the bot has joined.
-- `MASTERServerList.log`: Detailed log of actions related to the master server.
+- `ServerList.log`: Current list of servers with details like member counts and invites.
+- `MASTERServerList.log`: Historical log of server joins/leaves with summaries.
+- `FeedbackBans.json`: List of users banned from feedback.
+- `BlacklistedServers.json`: List of blacklisted servers.
+- `DM_Bans.json`: List of users banned from DMing the bot.
+- `DM_Global_Toggle.json`: DM toggle status and reason.
+- `ConsoleLogs/YYYY-MM-DD.log`: Daily console logs.
+
+Server-specific actions are logged to the configured log channel.
 
 ## Developer Information
 
-The bot includes developer-specific functionalities and commands. Developer IDs are specified in the `config.json` file.
+Developed by the HomiesHouse team. Contact us via:
 
-### /meetthedev
+- Discord: [Discord.gg/HomiesHouse](https://discord.gg/HomiesHouse)
+- Website: [HomiesHouse.net](https://HomiesHouse.net)
 
-**Description**: Meet the developer of CheersBot - @Wubbity.
+Developer IDs are defined in `config.json` under `bot_developer_ids`.
 
-**Usage**: `/meetthedev`
+## Installation
 
-### Developer Only
+1. **Prerequisites**:
+   - Python 3.8+
+   - FFmpeg installed (Windows: place in `FFMPEG/` folder; Linux: ensure in PATH or `FFMPEG/` folder)
+   - Discord bot token
 
-#### /reset_game_data
+2. **Setup**:
+   ```bash
+   git clone https://github.com/yourusername/CheersBotV2.git
+   cd CheersBotV2
+   pip install -r requirements.txt
+   ```
 
-**Description**: Reset/delete all user data from the 420Game. Bot developer only command.
+3. **Configuration**:
+   - Create a `.env` file with:
+     ```
+     DISCORD_BOT_TOKEN=your_token_here
+     MASTER_GUILD_ID=your_master_guild_id
+     ```
+   - Edit `config.json` with your settings.
 
-**Usage**: `/reset_game_data`
+4. **Run**:
+   ```bash
+   python bot.py
+   ```
 
-#### /maintenance
+## Contributing
 
-**Description**: Toggle maintenance mode. Restricted to @Wubbity.
+Contributions are welcome! Please:
 
-**Usage**: `/maintenance`
+1. Fork the repository.
+2. Create a feature branch (`git checkout -b feature/YourFeature`).
+3. Commit your changes (`git commit -m "Add YourFeature"`).
+4. Push to the branch (`git push origin feature/YourFeature`).
+5. Open a pull request.
 
-#### /server-blacklist
+For feedback or audio submissions, use the `/feedback` command in Discord.
 
-**Description**: Manage the server blacklist. Restricted to bot developers.
+## Support
 
-**Usage**: `/server-blacklist action:<add|remove|list> server_id:<ServerID> reason:<Reason>`
-
-#### /update
-
-**Description**: Send an update message to all servers. Developer only.
-
-**Usage**: `/update`
-
-#### /reload
-
-**Description**: Reload commands for all servers globally. Developer only.
-
-**Usage**: `/reload`
-
-For any issues or support, please reach out to the support team at [Discord.gg/HomiesHouse](https://discord.gg/HomiesHouse).
+For issues or questions, join our Discord server: [Discord.gg/HomiesHouse](https://discord.gg/HomiesHouse).
 
 ---
 
 CheersBot V2.0 by HomiesHouse | [Discord.gg/HomiesHouse](https://discord.gg/HomiesHouse)
-
