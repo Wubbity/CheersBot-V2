@@ -386,6 +386,7 @@ def load_global_config():
 
 global_config = load_global_config()
 debug_mode = global_config.get("debug", False)
+bot.global_config = global_config
 
 bot.is_server_blacklisted = is_server_blacklisted
 bot.handle_blacklisted_server = handle_blacklisted_server
