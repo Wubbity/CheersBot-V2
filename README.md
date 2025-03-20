@@ -18,6 +18,7 @@ The Public Version of CheersBot - A complete rewrite!
   - [/meetthedev](#meetthedev)
   - [/partners](#partners)
   - [/feedback](#feedback)
+  - [/uptime](#uptime)
 - [Developer Commands](#developer-commands)
   - [/server-blacklist](#server-blacklist)
   - [/feedback-ban](#feedback-ban)
@@ -131,6 +132,12 @@ CheersBot V2 is a Discord bot designed to bring fun and utility to your server. 
 **Description**: Allows users to send feedback, images, or audio files (.mp3, .m4a, .wav, .ogg) to developers for review.
 
 **Usage**: `/feedback`
+
+### /uptime
+
+**Description**: Allows users to check how long the bot has been online for as well as the longest uptime.
+
+**Usage**: `/uptime`
 
 ## Developer Commands
 
