@@ -147,24 +147,19 @@ def get_config_filepath(guild_id):
     return os.path.join(CONFIG_DIR, f'config_{guild_id}.json')
 
 def load_or_create_server_config(guild_id):
-    """Load or create a server-specific configuration."""
     config_file = os.path.join(BASE_DIR, f"configs/config_{guild_id}.json")
-    
-    # If the config file exists, load it
-    if (os.path.exists(config_file)):
+    if os.path.exists(config_file):
         with open(config_file, 'r') as f:
             config = json.load(f)
     else:
-        # Default configuration for new servers
         config = {
             "log_channel_id": None,
             "admin_roles": [],
-            "mode": "single",  # Default mode is 'single'
+            "mode": "single",
             "default_sound": "Cheers_Bitch.mp3"
         }
         save_config(guild_id, config)
 
-    # Ensure all keys exist in case config file is missing any of them
     config.setdefault("log_channel_id", None)
     config.setdefault("admin_roles", [])
     config.setdefault("mode", "single")
@@ -172,6 +167,14 @@ def load_or_create_server_config(guild_id):
     config.setdefault("blacklist_channels", [])
     config.setdefault("local_cheers_count", 0)
 
+    # Normalize sound status keys to include .mp3
+    for sound in get_available_sounds():
+        sound_name = sound.replace('.mp3', '')
+        if f'sound_status_{sound_name}' in config and f'sound_status_{sound}' not in config:
+            config[f'sound_status_{sound}'] = config.pop(f'sound_status_{sound_name}')
+        config.setdefault(f'sound_status_{sound}', True)
+
+    save_config(guild_id, config)
     return config
 
 async def update_server_list():
@@ -386,6 +389,7 @@ def load_global_config():
 
 global_config = load_global_config()
 debug_mode = global_config.get("debug", False)
+bot.global_config = global_config  # Add this line to attach it to the bot instance
 
 bot.is_server_blacklisted = is_server_blacklisted
 bot.handle_blacklisted_server = handle_blacklisted_server
@@ -1263,7 +1267,7 @@ async def setup(interaction: discord.Interaction, channel: discord.TextChannel):
 
     try:
         # Step 2: Ask for Admin Roles
-        await log_channel.send("Provide the role ID(s) for admin commands, separated by commas, or ping the roles. Type 'same' to use the previous roles.")
+        await log_channel.send("Provide the role ID(s) or ping the roles using @RoleName for admin commands, separated by commas. Type 'same' to use the previous roles (Only if you used /setup before)")
         try:
             role_msg = await bot.wait_for('message', timeout=60.0, check=check_message)
             if role_msg.content.strip().lower() == 'same' and previous_admin_roles:
@@ -1303,7 +1307,7 @@ async def setup(interaction: discord.Interaction, channel: discord.TextChannel):
 
         # Step 4: Ask for Join Frequency
         await log_channel.send(
-            "How often should the bot join?\n"
+            "How often should the bot join? (Please only type the number choice)\n"
             "1. Every Hour\n"
             "2. Allow user to choose timezones.\n"
             "3. Do not automatically join (Manual joins only using /cheers)"
@@ -1329,7 +1333,7 @@ async def setup(interaction: discord.Interaction, channel: discord.TextChannel):
                     current_time = datetime.now(timezone(timedelta(hours=tz_offset))).strftime('%I:%M %p')
                     embed.add_field(name=f"[{i}] {tz}", value=f"`Current Time: {current_time}`", inline=False)
                 await log_channel.send(embed=embed)
-                await log_channel.send("Please choose one or more timezones by entering their numbers separated by spaces (e.g., 1 3):")
+                await log_channel.send("Please choose one or more timezones by entering their numbers separated by spaces (e.g., 1 3 10):")
 
                 try:
                     tz_msg = await bot.wait_for('message', timeout=60.0, check=check_message)
@@ -1444,144 +1448,111 @@ async def leave(interaction: discord.Interaction):
     else:
         await interaction.response.send_message("Not connected to any voice channel.")
 
-class SoundButton(ui.Button):
-    def __init__(self, sound, enabled, server_config, row):
-        color = ButtonStyle.green if enabled else ButtonStyle.red
-        super().__init__(label=sound, style=color, row=row)
-        self.sound = sound
-        self.server_config = server_config
-
-    async def callback(self, interaction: Interaction):
-        # Toggle sound status
-        current_status = self.server_config.get(f"sound_status_{self.sound}", True)
-        self.server_config[f"sound_status_{self.sound}"] = not current_status
-
-        # Save updated config
-        save_config(interaction.guild.id, self.server_config)
-
-        # Update button color and text
-        self.style = ButtonStyle.green if not current_status else ButtonStyle.red
-        await interaction.response.edit_message(view=self.view)
-
-class SingleSoundButton(ui.Button):
-    def __init__(self, sound, server_config, row):
-        super().__init__(label=sound, style=ButtonStyle.blurple, row=row)
-        self.sound = sound
-        self.server_config = server_config
-
-    async def callback(self, interaction: Interaction):
-        # Set the selected sound as the default sound
-        self.server_config['default_sound'] = self.sound
-        save_config(interaction.guild.id, self.server_config)
-        await interaction.response.send_message(f"Default sound set to: {self.sound}", ephemeral=True)
-
-class SoundMenuView(ui.View):
-    def __init__(self, interaction, available_sounds, server_config, page=0):
-        super().__init__(timeout=180)  # 3 minutes timeout for interaction
+class SingleSoundMenuView(discord.ui.View):
+    def __init__(self, interaction: discord.Interaction, available_sounds: list, server_config: dict):
+        super().__init__(timeout=60)
         self.interaction = interaction
         self.available_sounds = available_sounds
         self.server_config = server_config
-        self.page = page
+        self.selected_sound = None
 
-        # Display the buttons for sounds (25 per page)
-        self.display_sounds()
+        # Add buttons for each sound
+        for sound in available_sounds:
+            self.add_item(self.SoundButton(sound))
 
-        # Pagination controls if there are more pages
-        if len(available_sounds) > 25:
-            self.add_item(ui.Button(label="Previous", style=ButtonStyle.blurple, row=5, 
-                                    disabled=self.page <= 0, callback=self.prev_page))
-            self.add_item(ui.Button(label="Next", style=ButtonStyle.blurple, row=5, 
-                                    disabled=(self.page + 1) * 25 >= len(available_sounds), 
-                                    callback=self.next_page))
+    class SoundButton(discord.ui.Button):
+        def __init__(self, sound: str):
+            super().__init__(label=sound, style=discord.ButtonStyle.primary)
+            self.sound = sound
 
-    def display_sounds(self):
-        start_index = self.page * 25
-        end_index = start_index + 25
+        async def callback(self, interaction: discord.Interaction):
+            view: SingleSoundMenuView = self.view
+            view.selected_sound = self.sound
+            view.server_config['default_sound'] = f"{self.sound}.mp3"
+            save_config(view.interaction.guild.id, view.server_config)
+            await interaction.response.edit_message(
+                content=f"Selected sound: {self.sound} for single mode.",
+                view=None
+            )
+            view.stop()
 
-        for idx, sound in enumerate(self.available_sounds[start_index:end_index]):
-            enabled = self.server_config.get(f"sound_status_{sound}", True)
-            row = idx // 5  # 5 buttons per row
-            self.add_item(SoundButton(sound, enabled, self.server_config, row=row))
+    async def on_timeout(self):
+        if not self.selected_sound:
+            await self.interaction.edit_original_response(
+                content="No sound selected. Command timed out.",
+                view=None
+            )
 
-    async def prev_page(self, interaction: Interaction):
-        self.page -= 1
-        await self.update_view(interaction)
-
-    async def next_page(self, interaction: Interaction):
-        self.page += 1
-        await self.update_view(interaction)
-
-    async def update_view(self, interaction: Interaction):
-        """Update the view when the page changes."""
-        self.clear_items()  # Clear all buttons before re-adding
-        self.display_sounds()
-        await interaction.response.edit_message(view=self)
-
-class SingleSoundMenuView(ui.View):
-    def __init__(self, interaction, available_sounds, server_config, page=0):
-        super().__init__(timeout=180)  # 3 minutes timeout for interaction
+class RandomSoundToggleView(discord.ui.View):
+    def __init__(self, interaction: discord.Interaction, available_sounds: list, server_config: dict):
+        super().__init__(timeout=60)
         self.interaction = interaction
         self.available_sounds = available_sounds
         self.server_config = server_config
-        self.page = page
 
-        # Display the buttons for sounds (25 per page)
-        self.display_sounds()
+        # Add toggle buttons for each sound
+        for sound in available_sounds:
+            self.add_item(self.ToggleButton(sound, server_config))
 
-        # Pagination controls if there are more pages
-        if len(available_sounds) > 25:
-            self.add_item(ui.Button(label="Previous", style=ButtonStyle.blurple, row=5, 
-                                    disabled=self.page <= 0, callback=self.prev_page))
-            self.add_item(ui.Button(label="Next", style=ButtonStyle.blurple, row=5, 
-                                    disabled=(self.page + 1) * 25 >= len(available_sounds), 
-                                    callback=self.next_page))
+    class ToggleButton(discord.ui.Button):
+        def __init__(self, sound: str, server_config: dict):
+            self.sound = sound
+            self.server_config = server_config
+            status = server_config.get(f'sound_status_{sound}.mp3', True)
+            super().__init__(
+                label=f"{sound} ({'On' if status else 'Off'})",
+                style=discord.ButtonStyle.green if status else discord.ButtonStyle.red
+            )
 
-    def display_sounds(self):
-        start_index = self.page * 25
-        end_index = start_index + 25
+        async def callback(self, interaction: discord.Interaction):
+            view: RandomSoundToggleView = self.view
+            current_status = view.server_config.get(f'sound_status_{self.sound}.mp3', True)
+            new_status = not current_status
+            view.server_config[f'sound_status_{self.sound}.mp3'] = new_status
+            self.style = discord.ButtonStyle.green if new_status else discord.ButtonStyle.red
+            self.label = f"{self.sound} ({'On' if new_status else 'Off'})"
+            save_config(view.interaction.guild.id, view.server_config)
+            await interaction.response.edit_message(view=view)
 
-        for idx, sound in enumerate(self.available_sounds[start_index:end_index]):
-            row = idx // 5  # 5 buttons per row
-            self.add_item(SingleSoundButton(sound, self.server_config, row=row))
+    async def on_timeout(self):
+        await self.interaction.edit_original_response(
+            content="Sound selection timed out. Current settings saved.",
+            view=None
+        )
 
-    async def prev_page(self, interaction: Interaction):
-        self.page -= 1
-        await self.update_view(interaction)
-
-    async def next_page(self, interaction: Interaction):
-        self.page += 1
-        await self.update_view(interaction)
-
-    async def update_view(self, interaction: Interaction):
-        """Update the view when the page changes."""
-        self.clear_items()  # Clear all buttons before re-adding
-        self.display_sounds()
-        await interaction.response.edit_message(view=self)
-
-@bot.tree.command(name="sounds", description="Enable or disable available sounds for this server.")
+@bot.tree.command(name="sounds", description="Manage available sounds based on server mode.")
 async def sounds(interaction: discord.Interaction):
     if is_server_blacklisted(interaction.guild.id):
         await handle_blacklisted_server(interaction)
         return
     if not await ensure_setup(interaction):
         return
+
     server_config = load_or_create_server_config(interaction.guild.id)
     mode = server_config.get('mode', 'single')
     available_sounds = get_available_sounds()
 
-    # Strip the .mp3 extension from the sound file names
-    available_sounds = [sound.replace('.mp3', '') for sound in available_sounds]
+    # Strip the .mp3 extension from sound file names
+    available_sounds_no_ext = [sound.replace('.mp3', '') for sound in available_sounds]
+
+    if not available_sounds_no_ext:
+        await interaction.response.send_message("No sounds available in the sounds folder.", ephemeral=True)
+        return
 
     if mode == 'single':
-        default_sound = server_config.get('default_sound', 'Cheers_Bitch.mp3').replace('.mp3', '')
-        await interaction.response.send_message(f"The current sound is: {default_sound}", ephemeral=True)
-    else:
-        if not available_sounds:
-            await interaction.response.send_message("No sounds available.", ephemeral=True)
-            return
-
-        view = SoundMenuView(interaction, available_sounds, server_config)
-        await interaction.response.send_message("Select sounds to enable/disable:", view=view, ephemeral=True)
+        view = SingleSoundMenuView(interaction, available_sounds_no_ext, server_config)
+        await interaction.response.send_message(
+            "Select the sound to use in single mode:",
+            view=view,
+            ephemeral=True
+        )
+    else:  # mode == 'random'
+        view = RandomSoundToggleView(interaction, available_sounds_no_ext, server_config)
+        await interaction.response.send_message(
+            "Toggle sounds to enable/disable for random mode:",
+            view=view,
+            ephemeral=True
+        )
 
 @bot.tree.command(name="mode", description="Change the bot's mode for this server.")
 @commands.has_permissions(administrator=True)
@@ -1597,22 +1568,24 @@ async def mode(interaction: discord.Interaction, mode: str):
     # Ensure mode is either 'single' or 'random'
     mode = mode.strip().lower()
     if mode not in ['single', 'random']:
-        await interaction.response.send_message("Invalid mode. Please choose either `single` or `random`.")
+        await interaction.response.send_message("Invalid mode. Please choose either `single` or `random`.", ephemeral=True)
         return
 
     # Save the new mode to the config
     server_config['mode'] = mode
 
-    # Enable or disable sounds based on the mode selected
+    # Handle mode-specific logic
     available_sounds = get_available_sounds()
     if mode == "single":
         view = SingleSoundMenuView(interaction, available_sounds, server_config)
         await interaction.response.send_message("Select the default sound for single mode:", view=view, ephemeral=True)
     elif mode == "random":
+        # Only set sound status to True for sounds that don't have a status yet
         for sound in available_sounds:
-            server_config[f'sound_status_{sound}'] = True
+            if f'sound_status_{sound}' not in server_config:
+                server_config[f'sound_status_{sound}'] = True
         save_config(interaction.guild.id, server_config)
-        await interaction.response.send_message(f"The mode has been set to {mode.capitalize()} for this server.")
+        await interaction.response.send_message(f"The mode has been set to {mode.capitalize()} for this server.", ephemeral=True)
 
 # /reload command, restricted to setup-listed users, administrators, and developers
 @bot.tree.command(name="reload", description="Reload and sync commands globally.")
