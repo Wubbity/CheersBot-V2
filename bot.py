@@ -9,6 +9,7 @@ import pytz
 import discord
 import math
 import importlib.util
+import atexit
 from discord.ext import commands, tasks
 from discord import app_commands, ui, ButtonStyle, Interaction
 from discord.ui import View, Button
@@ -21,6 +22,9 @@ from datetime import datetime, timedelta, timezone
 # Add logging setup
 import logging
 from logging.handlers import TimedRotatingFileHandler
+
+cheers_count_lock = asyncio.Lock()
+config_lock = asyncio.Lock()
 
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))  # Already defined, safe to use
 LOG_DIR = os.path.join(BASE_DIR, "ConsoleLogs")
@@ -76,6 +80,24 @@ MASTER_SERVER_LIST_PATH = os.path.join(SERVER_LOG_DIR, "MASTERServerList.log")
 USER_DATA_FOLDER = os.path.join(BASE_DIR, "UserData")
 if not os.path.exists(USER_DATA_FOLDER):
     os.makedirs(USER_DATA_FOLDER)
+
+# Path to store persistent feedback views
+FEEDBACK_VIEWS_PATH = os.path.join(SERVER_LOG_DIR, "FeedbackViews.json")
+
+# Load persistent feedback views
+def load_feedback_views():
+    if os.path.exists(FEEDBACK_VIEWS_PATH):
+        with open(FEEDBACK_VIEWS_PATH, 'r') as f:
+            return json.load(f)
+    return {}
+
+# Save persistent feedback views
+def save_feedback_views(feedback_views):
+    with open(FEEDBACK_VIEWS_PATH, 'w') as f:
+        json.dump(feedback_views, f, indent=4)
+
+# Global dictionary to hold active views
+persistent_views = {}
 
 # Path to store feedback bans
 FEEDBACK_BANS_PATH = os.path.join(SERVER_LOG_DIR, "FeedbackBans.json")
@@ -147,19 +169,24 @@ def get_config_filepath(guild_id):
     return os.path.join(CONFIG_DIR, f'config_{guild_id}.json')
 
 def load_or_create_server_config(guild_id):
+    """Load or create a server-specific configuration."""
     config_file = os.path.join(BASE_DIR, f"configs/config_{guild_id}.json")
-    if os.path.exists(config_file):
+    
+    # If the config file exists, load it
+    if (os.path.exists(config_file)):
         with open(config_file, 'r') as f:
             config = json.load(f)
     else:
+        # Default configuration for new servers
         config = {
             "log_channel_id": None,
             "admin_roles": [],
-            "mode": "single",
+            "mode": "single",  # Default mode is 'single'
             "default_sound": "Cheers_Bitch.mp3"
         }
         save_config(guild_id, config)
 
+    # Ensure all keys exist in case config file is missing any of them
     config.setdefault("log_channel_id", None)
     config.setdefault("admin_roles", [])
     config.setdefault("mode", "single")
@@ -167,14 +194,6 @@ def load_or_create_server_config(guild_id):
     config.setdefault("blacklist_channels", [])
     config.setdefault("local_cheers_count", 0)
 
-    # Normalize sound status keys to include .mp3
-    for sound in get_available_sounds():
-        sound_name = sound.replace('.mp3', '')
-        if f'sound_status_{sound_name}' in config and f'sound_status_{sound}' not in config:
-            config[f'sound_status_{sound}'] = config.pop(f'sound_status_{sound_name}')
-        config.setdefault(f'sound_status_{sound}', True)
-
-    save_config(guild_id, config)
     return config
 
 async def update_server_list():
@@ -279,11 +298,11 @@ async def create_unlimited_invite(guild):
     # Update the summary after logging
     update_master_server_summary()
 
-def save_config(guild_id, config_data):
-    """Save the server-specific configuration to a file."""
-    config_file = os.path.join(BASE_DIR, f"configs/config_{guild_id}.json")
-    with open(config_file, 'w') as f:
-        json.dump(config_data, f, indent=4)
+async def save_config(guild_id, config_data):
+    async with config_lock:
+        config_file = os.path.join(BASE_DIR, f"configs/config_{guild_id}.json")
+        with open(config_file, 'w') as f:
+            json.dump(config_data, f, indent=4)
 
 def get_available_sounds():
     return [f for f in os.listdir(SOUND_FOLDER) if f.endswith('.mp3')]
@@ -367,6 +386,23 @@ def is_developer(interaction: discord.Interaction) -> bool:
     developer_ids = global_config.get("bot_developer_ids", [])
     return str(interaction.user.id) in developer_ids
 
+def check_admin_or_developer(interaction: discord.Interaction) -> bool:
+    """Check if the user is a bot admin or developer."""
+    # Check if user is a developer
+    with open(config_path, 'r') as f:
+        global_config = json.load(f)
+    developer_ids = global_config.get("bot_developer_ids", [])
+    if str(interaction.user.id) in developer_ids:
+        return True
+    
+    # Check if user is a bot admin
+    server_config = load_or_create_server_config(interaction.guild.id)
+    admin_roles = server_config.get('admin_roles', [])
+    return (
+        interaction.user.guild_permissions.administrator or
+        any(role.id in admin_roles for role in interaction.user.roles)
+    )
+
 def is_setup_complete(guild_id):
     """Check if the setup is complete for the given guild."""
     config_file = get_config_filepath(guild_id)
@@ -388,12 +424,16 @@ def load_global_config():
         return json.load(f)
 
 global_config = load_global_config()
-debug_mode = global_config.get("debug", False)
-bot.global_config = global_config  # Add this line to attach it to the bot instance
 
+bot.global_config = global_config
 bot.is_server_blacklisted = is_server_blacklisted
 bot.handle_blacklisted_server = handle_blacklisted_server
 bot.ensure_setup = ensure_setup
+debug_mode = global_config.get("debug", False)
+bot.load_or_create_server_config = load_or_create_server_config
+
+async def reload_global_config():
+    bot.global_config = load_global_config()
 
 # Load master server ID from config.json
 master_server_id = global_config.get("master_server_id")
@@ -447,9 +487,8 @@ def schedule_join_tasks():
             continue
         server_config = load_or_create_server_config(guild.id)
         join_frequency = server_config.get('join_frequency', 'every_hour')
-        
         if join_frequency == 'every_hour':
-            # Only auto_join_task handles X:15 join and X:20 play
+            # Handled by auto_join_task
             pass
         elif join_frequency == 'timezones':
             join_timezones = server_config.get('join_timezones', [])
@@ -468,54 +507,47 @@ def schedule_join_tasks():
 async def on_ready():
     print(f"Logged in as {bot.user}!")
     await load_extensions()
-    await bot.tree.sync()
     create_and_populate_server_logs()
     await update_server_list()
-
-    server_count = len(bot.guilds)
-    await bot.change_presence(activity=discord.Activity(
-        type=discord.ActivityType.watching,
-        name=f"{server_count} servers"
-    ))
-    print(f"Set status to 'Watching {server_count} servers'")
-
-    schedule_join_tasks()  # For 'timezones' mode
-    scheduler.start()
-    if not auto_join_task.is_running():
-        auto_join_task.start()  # For 'every_hour' mode
-    if debug_mode:
-        print("Debug mode enabled. Listing first 20 servers:")
-        for i, guild in enumerate(bot.guilds[:20]):
-            print(f"{i+1}. {guild.name} (ID: {guild.id})")
-
-    # Sync commands after loading extensions
-    try:
-        await bot.tree.sync()
-        print("Commands synced successfully.")
-    except Exception as e:
-        print(f"Failed to sync commands: {str(e)}")
     
-    create_and_populate_server_logs()
-    await update_server_list()
-
-    # Set initial status with server count
-    server_count = len(bot.guilds)
-    await bot.change_presence(activity=discord.Activity(
-        type=discord.ActivityType.watching,
-        name=f"{server_count} servers"
-    ))
-    print(f"Set status to 'Watching {server_count} servers'")
-
-    # Start the scheduler for both modes
-    schedule_join_tasks()
-    scheduler.start()
-
     if not auto_join_task.is_running():
         auto_join_task.start()
+    
+    server_count = len(bot.guilds)
+    await bot.change_presence(activity=discord.Activity(
+        type=discord.ActivityType.watching,
+        name=f"{server_count} servers"
+    ))
+    print(f"Set status to 'Watching {server_count} servers'")
+
+    # Reload persistent feedback views
+    feedback_views = load_feedback_views()
+    for message_id, data in feedback_views.items():
+        try:
+            channel = bot.get_channel(int(data["channel_id"]))
+            if not channel:
+                continue
+            message = await channel.fetch_message(int(message_id))
+            guild = bot.get_guild(int(data["guild_id"]))
+            user = guild.get_member(int(data["user_id"])) or bot.get_user(int(data["user_id"]))
+            embed = discord.Embed.from_dict(data["embed"])
+            audio_files = [discord.Attachment(data={"filename": filename}, state=bot._connection) for filename in data["audio_files"]]
+            view = FeedbackView(embed, message, audio_files, user)
+            await message.edit(view=view)
+            persistent_views[int(message_id)] = view
+            print(f"Reloaded persistent view for message {message_id}")
+        except Exception as e:
+            print(f"Failed to reload view for message {message_id}: {e}")
+
+    if not scheduler.running:
+        scheduler.start()
+        print("Scheduler started in on_ready.")
+        schedule_join_tasks()
+    else:
+        print("Scheduler already running, skipping start.")
 
     if debug_mode:
-        print("Debug mode is enabled.")
-        print("Listing first 20 servers the bot is currently in:")
+        print("Debug mode enabled. Listing first 20 servers:")
         for i, guild in enumerate(bot.guilds[:20]):
             print(f"{i+1}. {guild.name} (ID: {guild.id})")
         if len(bot.guilds) > 50:
@@ -528,7 +560,12 @@ async def on_ready():
     else:
         print("Debug mode is disabled.")
 
-    # Check current time only for 'every_hour' mode
+    try:
+        await bot.tree.sync()
+        print("Commands synced successfully.")
+    except Exception as e:
+        print(f"Failed to sync commands: {str(e)}")
+
     now = datetime.now(timezone.utc)
     if now.minute >= 15 and now.minute < 20:
         for guild in bot.guilds:
@@ -536,18 +573,11 @@ async def on_ready():
             if server_config.get('join_frequency', 'every_hour') == 'every_hour':
                 await join_all_populated_voice_channels(guild)
 
-@bot.event
-async def on_resumed():
-    print("Bot has resumed connection.")
-    if not auto_join_task.is_running():
-        auto_join_task.start()  # Ensure the auto join task is running
-    if not log_current_time_task.is_running():
-        log_current_time_task.start()  # Ensure the time logging task is running
+# Cleanup function to save views on bot shutdown
+def save_views_on_exit():
+    save_feedback_views({str(k): v for k, v in persistent_views.items()})
 
-    # Rejoin voice channels if necessary
-    for guild in bot.guilds:
-        if guild.voice_client and not guild.voice_client.is_connected():
-            await join_all_populated_voice_channels(guild)
+atexit.register(save_views_on_exit)
 
 async def send_intro_message(guild):
     """Send an introductory message to the appropriate channel."""
@@ -646,9 +676,16 @@ class ApproveButton(ui.Button):
             await interaction.response.send_message("You do not have permission to use this command.", ephemeral=True)
             return
 
-        await interaction.response.send_message(f"The current sound name is: {self.audio_files[0].filename}. Would you like to change the sound name?", view=ChangeSoundNameView(self.audio_files, self.feedback_embed, self.feedback_msg, self.user), ephemeral=True)
-        self.view.clear_items()
-        await self.feedback_msg.edit(view=self.view)
+        try:
+            await interaction.response.defer(ephemeral=True)
+            await interaction.followup.send(
+                f"The current sound name is: {self.audio_files[0].filename}. Would you like to change the sound name?",
+                view=ChangeSoundNameView(self.audio_files, self.feedback_embed, self.feedback_msg, self.user, self.view),
+                ephemeral=True
+            )
+        except Exception as e:
+            print(f"Error in ApproveButton callback: {e}")
+            await interaction.followup.send(f"An error occurred: {e}", ephemeral=True)
 
 class DenyButton(ui.Button):
     def __init__(self, feedback_embed, feedback_msg, user):
@@ -667,20 +704,27 @@ class DenyButton(ui.Button):
             await interaction.response.send_message("You do not have permission to use this command.", ephemeral=True)
             return
 
+        await interaction.response.defer(ephemeral=True)
         self.feedback_embed.color = discord.Color.red()
         self.feedback_embed.add_field(name="Status", value=f"Denied by {interaction.user.mention}", inline=False)
-        await self.feedback_msg.edit(embed=self.feedback_embed)
-        await interaction.response.send_message("Feedback has been denied.", ephemeral=True)
-        self.view.clear_items()
-        await self.feedback_msg.edit(view=self.view)
+        await self.feedback_msg.edit(embed=self.feedback_embed, view=None)
+        await interaction.followup.send("Feedback has been denied.", ephemeral=True)
+        # Remove from persistent views since action is complete
+        if self.feedback_msg.id in persistent_views:
+            del persistent_views[self.feedback_msg.id]
+            feedback_views = load_feedback_views()
+            if str(self.feedback_msg.id) in feedback_views:
+                del feedback_views[str(self.feedback_msg.id)]
+                save_feedback_views(feedback_views)
 
 class ChangeSoundNameView(ui.View):
-    def __init__(self, audio_files, feedback_embed, feedback_msg, user):
+    def __init__(self, audio_files, feedback_embed, feedback_msg, user, parent_view):
         super().__init__(timeout=60)
         self.audio_files = audio_files
         self.feedback_embed = feedback_embed
         self.feedback_msg = feedback_msg
         self.user = user
+        self.parent_view = parent_view
         self.current_file_index = 0
 
     @ui.button(label="Yes", style=ButtonStyle.green)
@@ -708,37 +752,70 @@ class ChangeSoundNameView(ui.View):
             await self.feedback_msg.edit(embed=self.feedback_embed)
             await interaction.followup.send(f"Sound has been saved as {new_filename}.", ephemeral=True)
 
-            # Delete the user's message with the new name
             await new_name_msg.delete()
 
             self.current_file_index += 1
             if self.current_file_index < len(self.audio_files):
-                await interaction.followup.send(f"The current sound name is: {self.audio_files[self.current_file_index].filename}. Would you like to change the sound name?", view=self, ephemeral=True)
+                await interaction.followup.send(
+                    f"The current sound name is: {self.audio_files[self.current_file_index].filename}. Would you like to change the sound name?",
+                    view=ChangeSoundNameView(self.audio_files, self.feedback_embed, self.feedback_msg, self.user, self.parent_view),
+                    ephemeral=True
+                )
             else:
                 await interaction.followup.send("All audio files have been processed.", ephemeral=True)
+                # Remove from persistent views since action is complete
+                if self.feedback_msg.id in persistent_views:
+                    del persistent_views[self.feedback_msg.id]
+                    feedback_views = load_feedback_views()
+                    if str(self.feedback_msg.id) in feedback_views:
+                        del feedback_views[str(self.feedback_msg.id)]
+                        save_feedback_views(feedback_views)
+
         except asyncio.TimeoutError:
             await interaction.followup.send("Renaming timed out. Please try again.", ephemeral=True)
+        except Exception as e:
+            print(f"Error in yes_button: {e}")
+            await interaction.followup.send(f"An error occurred: {e}", ephemeral=True)
 
     @ui.button(label="No", style=ButtonStyle.red)
     async def no_button(self, interaction: Interaction, button: ui.Button):
-        original_filepath = os.path.join(SOUND_FOLDER, self.audio_files[self.current_file_index].filename)
-        await self.audio_files[self.current_file_index].save(original_filepath)
+        try:
+            original_filepath = os.path.join(SOUND_FOLDER, self.audio_files[self.current_file_index].filename)
+            await self.audio_files[self.current_file_index].save(original_filepath)
 
-        self.feedback_embed.color = discord.Color.green()
-        self.feedback_embed.add_field(name="Status", value=f"Approved by {interaction.user.mention}", inline=False)
-        self.feedback_embed.add_field(name="Original Name", value=self.audio_files[self.current_file_index].filename, inline=False)
-        await self.feedback_msg.edit(self.feedback_embed)
-        await interaction.response.send_message(f"Sound has been saved as {self.audio_files[self.current_file_index].filename}.", ephemeral=True)
+            self.feedback_embed.color = discord.Color.green()
+            self.feedback_embed.add_field(name="Status", value=f"Approved by {interaction.user.mention}", inline=False)
+            self.feedback_embed.add_field(name="Original Name", value=self.audio_files[self.current_file_index].filename, inline=False)
+            await self.feedback_msg.edit(embed=self.feedback_embed)
+            await interaction.response.send_message(f"Sound has been saved as {self.audio_files[self.current_file_index].filename}.", ephemeral=True)
 
-        self.current_file_index += 1
-        if self.current_file_index < len(self.audio_files):
-            await interaction.followup.send(f"The current sound name is: {self.audio_files[self.current_file_index].filename}. Would you like to change the sound name?", view=self, ephemeral=True)
-        else:
-            await interaction.followup.send("All audio files have been processed.", ephemeral=True)
+            self.current_file_index += 1
+            if self.current_file_index < len(self.audio_files):
+                await interaction.followup.send(
+                    f"The current sound name is: {self.audio_files[self.current_file_index].filename}. Would you like to change the sound name?",
+                    view=ChangeSoundNameView(self.audio_files, self.feedback_embed, self.feedback_msg, self.user, self.parent_view),
+                    ephemeral=True
+                )
+            else:
+                await interaction.followup.send("All audio files have been processed.", ephemeral=True)
+                # Remove from persistent views since action is complete
+                if self.feedback_msg.id in persistent_views:
+                    del persistent_views[self.feedback_msg.id]
+                    feedback_views = load_feedback_views()
+                    if str(self.feedback_msg.id) in feedback_views:
+                        del feedback_views[str(self.feedback_msg.id)]
+                        save_feedback_views(feedback_views)
+        except Exception as e:
+            print(f"Error in no_button: {e}")
+            await interaction.followup.send(f"An error occurred: {e}", ephemeral=True)
 
 class FeedbackView(ui.View):
     def __init__(self, feedback_embed, feedback_msg, audio_files, user):
-        super().__init__(timeout=180)
+        super().__init__(timeout=None)  # Persistent view
+        self.feedback_embed = feedback_embed
+        self.feedback_msg = feedback_msg
+        self.audio_files = audio_files
+        self.user = user
         self.add_item(ApproveButton(feedback_embed, feedback_msg, audio_files, user))
         self.add_item(DenyButton(feedback_embed, feedback_msg, user))
 
@@ -759,8 +836,6 @@ async def feedback(interaction: discord.Interaction):
         await handle_blacklisted_server(interaction)
         return
 
-    feedback_channel_id = 1315133468337770578  # Developer feedback channel ID from config.json
-
     embed = discord.Embed(
         title="Feedback Command",
         description=(
@@ -775,9 +850,8 @@ async def feedback(interaction: discord.Interaction):
         return msg.author == interaction.user and msg.channel == interaction.channel
 
     try:
-        feedback_msg = await bot.wait_for('message', timeout=300.0, check=check_message)  # Wait for 5 minutes
+        feedback_msg = await bot.wait_for('message', timeout=300.0, check=check_message)
 
-        # Send "Working..." embed
         working_embed = discord.Embed(
             title="Working...",
             description="Processing your feedback. Please wait. Adding images or audio files may take longer than expected.",
@@ -785,7 +859,6 @@ async def feedback(interaction: discord.Interaction):
         )
         working_message = await interaction.followup.send(embed=working_embed, ephemeral=True)
 
-        # Create the feedback embed
         feedback_embed = discord.Embed(
             title="User Feedback",
             description=f"{feedback_msg.content}\n\nFeedback from <@{interaction.user.id}>",
@@ -793,7 +866,6 @@ async def feedback(interaction: discord.Interaction):
         )
         feedback_embed.set_author(name=interaction.user.name, icon_url=interaction.user.avatar.url)
 
-        # Load global config settings for footer
         with open(config_path, 'r') as f:
             global_config = json.load(f)
         log_settings = global_config.get("log_settings", {})
@@ -804,7 +876,6 @@ async def feedback(interaction: discord.Interaction):
         feedback_embed.set_footer(text=footer_text, icon_url=footer_icon_url)
         feedback_embed.set_thumbnail(url=thumbnail_url)
 
-        # Attach images and audio files
         files = []
         image_count = 0
         audio_count = 0
@@ -818,25 +889,32 @@ async def feedback(interaction: discord.Interaction):
                 files.append(await attachment.to_file())
                 image_count += 1
 
-        # Send the feedback embed first
+        feedback_channel_id = global_config.get("feedback_channel_id")
+        if not feedback_channel_id:
+            raise ValueError("Feedback channel ID is not set in the configuration.")
         feedback_channel = bot.get_channel(feedback_channel_id)
         if feedback_channel:
             feedback_msg_in_channel = await feedback_channel.send(embed=feedback_embed)
-
-            # Send the files after the embed
             if files:
                 await feedback_channel.send(files=files)
-
-            # Add Approve and Deny buttons if there are audio files
             if audio_files:
                 view = FeedbackView(feedback_embed, feedback_msg_in_channel, audio_files, interaction.user)
                 await feedback_msg_in_channel.edit(view=view)
+                
+                feedback_views = load_feedback_views()
+                feedback_views[str(feedback_msg_in_channel.id)] = {
+                    "channel_id": feedback_channel_id,
+                    "guild_id": interaction.guild.id,
+                    "user_id": interaction.user.id,
+                    "audio_files": [att.filename for att in audio_files],
+                    "embed": feedback_embed.to_dict()
+                }
+                save_feedback_views(feedback_views)
+                persistent_views[feedback_msg_in_channel.id] = view
 
-        # Clean up user's message
         await feedback_msg.delete()
         await interaction.delete_original_response()
 
-        # Notify the user
         confirmation_embed = discord.Embed(
             title="Feedback Sent",
             description="Your feedback has been sent successfully.",
@@ -860,12 +938,42 @@ async def feedback(interaction: discord.Interaction):
         await asyncio.sleep(30)
         await timeout_message.delete()
 
-## Increment the manual smoke seshes count
-def increment_420_somewhere_count(num_servers=1):
-    cheers_count = load_cheers_count()
-    cheers_count['its_420_somewhere_count'] = cheers_count.get('its_420_somewhere_count', 0) + num_servers
-    cheers_count['total_smoke_seshes_count'] = cheers_count['its_420_somewhere_count'] + cheers_count['manual_smoke_seshes_count']
-    save_cheers_count(cheers_count)
+@bot.command(name='feedback_unban', aliases=['Feedback_unban', 'feedback_Unban', 'Feedback_Unban'])
+async def feedback_unban(ctx):
+    """Unban a user from using the /feedback command."""
+    with open(config_path, 'r') as f:
+        config = json.load(f)
+
+    if str(ctx.author.id) not in config['bot_developer_ids']:
+        await ctx.send('You do not have permission to use this command.')
+        return
+
+    await ctx.send('Please provide the user ID to unban:')
+    def check(m):
+        return m.author == ctx.author and m.channel == ctx.channel
+
+    try:
+        msg = await bot.wait_for('message', check=check, timeout=30.0)
+        user_id = msg.content.strip()
+
+        feedback_bans = load_feedback_bans()
+        if user_id in feedback_bans:
+            del feedback_bans[user_id]
+            save_feedback_bans(feedback_bans)
+            await ctx.send(f'User with ID {user_id} has been unbanned from using the /feedback command.')
+        else:
+            await ctx.send(f'User with ID {user_id} is not banned from using the /feedback command.')
+    except asyncio.TimeoutError:
+        await ctx.send('You took too long to respond. Please try again.')
+
+async def increment_420_somewhere_count(num_servers=1):
+    async with cheers_count_lock:
+        cheers_count = load_cheers_count()
+        cheers_count['its_420_somewhere_count'] = cheers_count.get('its_420_somewhere_count', 0) + num_servers
+        cheers_count['total_smoke_seshes_count'] = cheers_count['its_420_somewhere_count'] + cheers_count['manual_smoke_seshes_count']
+        save_cheers_count(cheers_count)
+        if debug_mode:
+            print(f"Incremented 420 somewhere count by {num_servers}. New value: {cheers_count['its_420_somewhere_count']}")
 
 # Load cheers count data
 def load_cheers_count():
@@ -877,35 +985,30 @@ def save_cheers_count(data):
     with open('cheers-count.json', 'w') as f:
         json.dump(data, f, indent=4)
 
-# Increment the 420 somewhere count
-def increment_420_somewhere_count():
-    cheers_count = load_cheers_count()
-    cheers_count['its_420_somewhere_count'] = cheers_count.get('its_420_somewhere_count', 0) + 1
-    cheers_count['total_smoke_seshes_count'] = cheers_count['its_420_somewhere_count'] + cheers_count['manual_smoke_seshes_count']
-    save_cheers_count(cheers_count)
-
 # Increment the manual smoke seshes count
-def increment_manual_smoke_seshes_count():
-    cheers_count = load_cheers_count()
-    cheers_count['manual_smoke_seshes_count'] = cheers_count.get('manual_smoke_seshes_count', 0) + 1
-    cheers_count['total_smoke_seshes_count'] = cheers_count['its_420_somewhere_count'] + cheers_count['manual_smoke_seshes_count']
-    save_cheers_count(cheers_count)
+async def increment_manual_smoke_seshes_count():
+    async with cheers_count_lock:
+        cheers_count = load_cheers_count()
+        cheers_count['manual_smoke_seshes_count'] = cheers_count.get('manual_smoke_seshes_count', 0) + 1
+        cheers_count['total_smoke_seshes_count'] = cheers_count['its_420_somewhere_count'] + cheers_count['manual_smoke_seshes_count']
+        save_cheers_count(cheers_count)
 
 # Increment the play count for the sound
-def increment_sound_play_count(sound_name):
-    cheers_count = load_cheers_count()
-    cheers_count['sound_play_counts'][sound_name] = cheers_count['sound_play_counts'].get(sound_name, 0) + 1
-    save_cheers_count(cheers_count)
+async def increment_sound_play_count(sound_name):
+    async with cheers_count_lock:
+        cheers_count = load_cheers_count()
+        cheers_count['sound_play_counts'][sound_name] = cheers_count['sound_play_counts'].get(sound_name, 0) + 1
+        save_cheers_count(cheers_count)
 
 # Increment the local cheers count
-def increment_local_cheers_count(guild_id):
-    server_config = load_or_create_server_config(guild_id)
-    server_config['local_cheers_count'] = server_config.get('local_cheers_count', 0) + 1
-    save_config(guild_id, server_config)
+async def increment_local_cheers_count(guild_id):
+    async with config_lock:
+        server_config = load_or_create_server_config(guild_id)
+        server_config['local_cheers_count'] = server_config.get('local_cheers_count', 0) + 1
+        save_config(guild_id, server_config)
 
 # Auto-Join Task
 async def join_and_play_sound(guild, voice_channel, user):
-    """Join a specific voice channel, play the configured sound, and leave."""
     vc = None
     try:
         vc = await voice_channel.connect(reconnect=True)
@@ -913,7 +1016,7 @@ async def join_and_play_sound(guild, voice_channel, user):
         await log_action(
             guild, "Joined Voice Channel",
             f"Joined **{voice_channel.name}** at {datetime.now(timezone.utc).strftime('%H:%M:%S')} UTC.",
-            user  # Log with bot as the executing user
+            user
         )
 
         server_config = load_or_create_server_config(guild.id)
@@ -926,7 +1029,7 @@ async def join_and_play_sound(guild, voice_channel, user):
         else:
             enabled_sounds = [s for s in available_sounds if server_config.get(f'sound_status_{s}', True)]
             if not enabled_sounds:
-                enabled_sounds = available_sounds  # Fallback to all sounds if none are enabled
+                enabled_sounds = available_sounds
             sound_to_play = os.path.join(SOUND_FOLDER, random.choice(enabled_sounds))
 
         if vc.is_playing():
@@ -936,21 +1039,17 @@ async def join_and_play_sound(guild, voice_channel, user):
         audio_source = discord.FFmpegPCMAudio(sound_to_play, executable=ffmpeg_path)
         vc.play(audio_source)
 
-        # Increment the play count for the sound
-        cheers_count = load_cheers_count()
+        # Increment counts using async functions
         sound_name = os.path.basename(sound_to_play).replace('.mp3', '')
-        cheers_count['sound_play_counts'][sound_name] = cheers_count['sound_play_counts'].get(sound_name, 0) + 1
-        save_cheers_count(cheers_count)
-
-        # Increment the local cheers count
-        increment_local_cheers_count(guild.id)
+        await increment_sound_play_count(sound_name)
+        await increment_local_cheers_count(guild.id)
 
         while vc.is_playing():
             await asyncio.sleep(1)
         await log_action(guild, "Playing Sound", f"Played **{os.path.basename(sound_to_play)}** at {datetime.now(timezone.utc).strftime('%H:%M:%S')} UTC.", user)
-        await asyncio.sleep(2)  # 2-second delay after the sound has finished playing
+        await asyncio.sleep(2)
     except Exception as e:
-        print(f"Error playing sound in {vc.channel.name} on {guild.name}: {e}")
+        print(f"Error playing sound in {vc.channel.name if vc else 'unknown channel'} on {guild.name}: {e}")
     finally:
         if vc:
             await vc.disconnect()
@@ -969,7 +1068,7 @@ async def auto_join_task():
             server_config = load_or_create_server_config(guild.id)
             join_frequency = server_config.get('join_frequency', 'every_hour')
             
-            if join_frequency == 'every_hour':
+            if join_frequency == 'every_hour' and not guild.voice_client:
                 tasks.append(schedule_join_and_play(guild))
         
         if tasks:
@@ -997,25 +1096,20 @@ async def schedule_join_and_play(guild):
 
     try:
         # Wait 5 minutes (until X:20), checking connection periodically
-        for _ in range(300):  # 300 seconds = 5 minutes
+        for _ in range(300):
             if not vc.is_connected():
                 print(f"Disconnected prematurely from {voice_channel.name} in {guild.name}")
                 return
             await asyncio.sleep(1)
-
-        # Play sound at X:20
-        await play_sound_and_leave(guild, vc, bot.user)
-        increment_420_somewhere_count(1)
+        await play_sound_and_leave(guild, vc, bot.user, is_automatic=True)
+        if debug_mode:
+            print(f"Incremented its_420_somewhere_count for {guild.name}")
     except Exception as e:
         print(f"Error during wait or play in {guild.name}: {e}")
     finally:
         if vc and vc.is_connected():
             await vc.disconnect()
-            await log_action(
-                guild, "Left Voice Channel",
-                f"Disconnected from **{voice_channel.name}** at {datetime.now(timezone.utc).strftime('%H:%M:%S')} UTC.",
-                bot.user
-            )
+            await log_action(guild, "Left Voice Channel", f"Disconnected from **{voice_channel.name}** at {datetime.now(timezone.utc).strftime('%H:%M:%S')} UTC.", bot.user)
 
 async def join_and_play_420(guild):
     server_config = load_or_create_server_config(guild.id)
@@ -1031,24 +1125,17 @@ async def join_and_play_420(guild):
         return
 
     vc = None
-    audio_source = None
     try:
         vc = await voice_channel.connect(reconnect=True)
         await log_action(guild, "Joined Voice Channel", 
-                        f"Joined **{voice_channel.name}** at {datetime.now(timezone.utc).strftime('%H:%M:%S')} UTC.", 
-                        bot.user)
-        await play_sound_and_leave(guild, vc, bot.user)
-        increment_420_somewhere_count(1)  # Increment by 1 for this server
+                    f"Joined **{voice_channel.name}** at {datetime.now(timezone.utc).strftime('%H:%M:%S')} UTC.", bot.user)
+        await play_sound_and_leave(guild, vc, bot.user, is_automatic=True)
     except Exception as e:
         print(f"Error in {guild.name}: {e}")
     finally:
         if vc and vc.is_connected():
             await vc.disconnect()
-            await log_action(guild, "Left Voice Channel", 
-                            f"Disconnected from **{voice_channel.name}** at {datetime.now(timezone.utc).strftime('%H:%M:%S')} UTC.", 
-                            bot.user)
-        if audio_source:
-            audio_source.cleanup()
+            await log_action(guild, "Left Voice Channel", f"Disconnected from **{voice_channel.name}** at {datetime.now(timezone.utc).strftime('%H:%M:%S')} UTC.", bot.user)
 
 async def join_all_populated_voice_channels(guild):
     """Join the most populated voice channels in the specified guild."""
@@ -1071,14 +1158,21 @@ async def join_all_populated_voice_channels(guild):
             print(f"No valid voice channels to join in {guild.name}. Skipping join action.")
 
 async def play_sound_in_all_channels(guild):
-    """Play the configured sound in all voice channels where the bot is connected in the specified guild."""
     if guild.voice_client and guild.voice_client.is_connected():
-        await play_sound_and_leave(guild, guild.voice_client, bot.user)  # Play sound and leave the voice channel
-        increment_420_somewhere_count()  # Increment the 420 somewhere count for each server
+        await play_sound_and_leave(guild, guild.voice_client, bot.user, is_automatic=True)
 
 async def join_voice_channel(guild, voice_channel, user):
     vc = None
     try:
+        # Check if the bot is already connected in this guild
+        if guild.voice_client and guild.voice_client.is_connected():
+            if guild.voice_client.channel == voice_channel:
+                print(f"Already connected to {voice_channel.name} in {guild.name}")
+                return guild.voice_client  # Reuse the existing connection
+            else:
+                # Disconnect from the current channel if it's different
+                await guild.voice_client.disconnect()
+
         vc = await voice_channel.connect(reconnect=True)
         print(f"Joined {voice_channel.name} in {guild.name} at {datetime.now(timezone.utc).strftime('%H:%M:%S')} UTC")
         await log_action(
@@ -1086,17 +1180,22 @@ async def join_voice_channel(guild, voice_channel, user):
             f"Joined **{voice_channel.name}** at {datetime.now(timezone.utc).strftime('%H:%M:%S')} UTC.",
             user
         )
-    except (discord.errors.ClientException, discord.errors.ConnectionError) as e:
+    except discord.errors.ClientException as e:
         print(f"Failed to join {voice_channel.name} in {guild.name}: {e}")
         server_config = load_or_create_server_config(guild.id)
         admin_roles = server_config.get('admin_roles', [])
         log_channel_id = server_config.get('log_channel_id')
         log_channel = bot.get_channel(log_channel_id) if log_channel_id else None
 
+        with open(config_path, 'r') as f:
+            global_config = json.load(f)
+        developer_id = global_config.get("bot_developer_ids", [])[0]
+
         message = (
             f"Hey! I tried to join the most populated voice channel {voice_channel.name} but didn't have permission to. "
             f"Error: {str(e)}. Please ensure I have 'Connect' and 'Speak' permissions, or use /blacklist to exclude this channel. "
-            f"{' '.join([f'<@&{role_id}>' for role_id in admin_roles])}"
+            f"Pinging the dev (If he's in this server..) <@{developer_id}> "
+            f"You are free to ignore/report this message to <@{developer_id}> by **__directly messaging the bot.__**"
         )
         if log_channel and log_channel.permissions_for(guild.me).send_messages:
             await log_channel.send(message)
@@ -1106,12 +1205,15 @@ async def join_voice_channel(guild, voice_channel, user):
                     await text_channel.send(message)
                     break
         return None
+    except discord.errors.ConnectionClosed as e:
+        print(f"Connection closed while joining {voice_channel.name} in {guild.name}: {e}")
+        return None
     except Exception as e:
         print(f"Unexpected error joining {voice_channel.name} in {guild.name}: {e}")
         return None
     return vc
 
-async def play_sound_and_leave(guild, vc, user):
+async def play_sound_and_leave(guild, vc, user, is_automatic=False):
     if not vc or not vc.is_connected():
         print(f"Voice client invalid or disconnected in {guild.name}")
         return
@@ -1119,13 +1221,21 @@ async def play_sound_and_leave(guild, vc, user):
     server_config = load_or_create_server_config(guild.id)
     mode = server_config.get("mode", "single")
     default_sound = server_config.get("default_sound", "Cheers_Bitch.mp3")
-    available_sounds = get_available_sounds()
+    available_sounds = get_available_sounds()  # Returns filenames with .mp3
 
     if mode == "single":
         sound_to_play = os.path.join(SOUND_FOLDER, default_sound)
-    else:
-        enabled_sounds = [s for s in available_sounds if server_config.get(f'sound_status_{s}', True)]
+        if not os.path.exists(sound_to_play):
+            print(f"Default sound {default_sound} not found for {guild.name}, falling back to Cheers_Bitch.mp3")
+            sound_to_play = os.path.join(SOUND_FOLDER, "Cheers_Bitch.mp3")
+    else:  # random mode
+        # Filter enabled sounds based on sound_status_<sound> keys
+        enabled_sounds = [
+            s for s in available_sounds
+            if server_config.get(f"sound_status_{s}", True)
+        ]
         if not enabled_sounds:
+            print(f"No enabled sounds for {guild.name}, falling back to all available sounds")
             enabled_sounds = available_sounds
         sound_to_play = os.path.join(SOUND_FOLDER, random.choice(enabled_sounds))
 
@@ -1147,12 +1257,16 @@ async def play_sound_and_leave(guild, vc, user):
         vc.play(audio_source)
         print(f"Started playing {sound_to_play} in {vc.channel.name} at {datetime.now(timezone.utc).strftime('%H:%M:%S')} UTC")
 
-        sound_name = os.path.basename(sound_to_play).replace('.mp3', '')
-        increment_sound_play_count(sound_name)
-        increment_local_cheers_count(guild.id)
-
         while vc.is_playing():
             await asyncio.sleep(1)
+
+        sound_name = os.path.basename(sound_to_play).replace('.mp3', '')
+        await increment_sound_play_count(sound_name)
+        await increment_local_cheers_count(guild.id)
+        if is_automatic:
+            await increment_420_somewhere_count(1)
+            if debug_mode:
+                print(f"Incremented its_420_somewhere_count for {guild.name}")
         print(f"Finished playing {sound_to_play} in {vc.channel.name} at {datetime.now(timezone.utc).strftime('%H:%M:%S')} UTC")
         await log_action(
             guild, "Playing Sound",
@@ -1164,7 +1278,6 @@ async def play_sound_and_leave(guild, vc, user):
         print(f"Client error playing sound in {vc.channel.name} on {guild.name}: {e}")
     except Exception as e:
         print(f"Error playing sound in {vc.channel.name} on {guild.name}: {e}")
-        # Log detailed FFmpeg errors if possible
         if "ffmpeg" in str(e).lower():
             print(f"FFmpeg-specific error: {e}")
     finally:
@@ -1246,128 +1359,110 @@ async def setup(interaction: discord.Interaction, channel: discord.TextChannel):
     if is_server_blacklisted(interaction.guild.id):
         await handle_blacklisted_server(interaction)
         return
+
     log_channel_id = channel.id
     log_channel = channel  # Store reference to the log channel
+
+    # Load existing config or create a new one
+    server_config = load_or_create_server_config(interaction.guild.id)
+    previous_admin_roles = server_config.get('admin_roles', [])
 
     await interaction.response.send_message(
         f"Logging channel set to {channel.mention}. Please continue setup in this channel."
     )
 
     def check_message(msg: discord.Message):
-        # Debugging: Print all message attributes
-        print(f"Received message: '{msg.content}' | Author: {msg.author} | Channel: {msg.channel}")
-        print(f"Message ID: {msg.id}, Message Type: {msg.type}, Embeds: {msg.embeds}")
-        print(f"Mentions: {msg.mentions}, Role Mentions: {msg.role_mentions}")
-
-        # Ensure the message is from the correct user in the correct channel
         return msg.author == interaction.user and msg.channel == log_channel
 
-    server_config = load_or_create_server_config(interaction.guild.id)
-    previous_admin_roles = server_config.get('admin_roles', [])
-
     try:
-        # Step 2: Ask for Admin Roles
-        await log_channel.send("Provide the role ID(s) or ping the roles using @RoleName for admin commands, separated by commas. Type 'same' to use the previous roles (Only if you used /setup before)")
-        try:
-            role_msg = await bot.wait_for('message', timeout=60.0, check=check_message)
-            if role_msg.content.strip().lower() == 'same' and previous_admin_roles:
-                role_ids = previous_admin_roles
-                await log_channel.send(f"Admin roles set to: {', '.join([f'<@&{role_id}>' for role_id in role_ids])}")
-            else:
-                role_ids = (
-                    [role.id for role in role_msg.role_mentions]
-                    or [int(r.strip()) for r in role_msg.content.split(",") if r.strip().isdigit()]
-                )
-                if not role_ids:
-                    await log_channel.send("No valid role IDs provided. Setup canceled.")
-                    return
-                await log_channel.send(f"Admin roles set to: {', '.join([f'<@&{role_id}>' for role_id in role_ids])}")
-        except asyncio.TimeoutError:
-            await log_channel.send("Setup timed out. Please run `/setup` again.")
-            return
-
-        # Step 3: Ask for Sound Mode (Single or Random)
-        await log_channel.send("What sound mode should the bot start with? Type `single` or `random`.\nSingle plays the same single sound. Random chooses a random sound from our sound folder.")
-        try:
-            mode_msg = await bot.wait_for('message', timeout=60.0, check=check_message)
-            mode = mode_msg.content.strip().lower()
-
-            # Debug: Print the received mode
-            print(f"Raw mode content: '{mode_msg.content}' | Stripped mode content: '{mode}'")
-
-            mode = mode.lower()  # Ensure it's in lowercase
-            if mode not in ['single', 'random']:
-                await log_channel.send("Invalid mode selection. Setup canceled.")
+        # Step 1: Ask for Admin Roles
+        await log_channel.send("Provide the role ID(s) for admin commands, separated by commas, or ping the roles. Type 'same' to use the previous roles.")
+        role_msg = await bot.wait_for('message', timeout=60.0, check=check_message)
+        if role_msg.content.strip().lower() == 'same' and previous_admin_roles:
+            role_ids = previous_admin_roles
+            await log_channel.send(f"Admin roles set to: {', '.join([f'<@&{role_id}>' for role_id in role_ids])}")
+        else:
+            role_ids = (
+                [role.id for role in role_msg.role_mentions] or
+                [int(r.strip()) for r in role_msg.content.split(",") if r.strip().isdigit()]
+            )
+            if not role_ids:
+                await log_channel.send("No valid role IDs provided. Setup canceled.")
                 return
+            await log_channel.send(f"Admin roles set to: {', '.join([f'<@&{role_id}>' for role_id in role_ids])}")
 
-            await log_channel.send(f"Mode set to: {mode.capitalize()}")
-        except asyncio.TimeoutError:
-            await log_channel.send("Setup timed out. Please run `/setup` again.")
+        # Step 2: Ask for Sound Mode (Single or Random)
+        await log_channel.send("What sound mode should the bot start with? Type `single` or `random`.\nSingle plays the same single sound. Random chooses a random sound from our sound folder.")
+        mode_msg = await bot.wait_for('message', timeout=60.0, check=check_message)
+        mode = mode_msg.content.strip().lower()
+
+        if mode not in ['single', 'random']:
+            await log_channel.send("Invalid mode selection. Setup canceled.")
             return
+        await log_channel.send(f"Mode set to: {mode.capitalize()}")
 
-        # Step 4: Ask for Join Frequency
+        # Step 3: Ask for Join Frequency
         await log_channel.send(
-            "How often should the bot join? (Please only type the number choice)\n"
+            "How often should the bot join? Enter a number:\n"
             "1. Every Hour\n"
-            "2. Allow user to choose timezones.\n"
+            "2. Allow user to choose timezones\n"
             "3. Do not automatically join (Manual joins only using /cheers)"
         )
-        try:
-            frequency_msg = await bot.wait_for('message', timeout=60.0, check=check_message)
-            frequency_choice = frequency_msg.content.strip()
+        frequency_msg = await bot.wait_for('message', timeout=60.0, check=check_message)
+        frequency_choice = frequency_msg.content.strip()
 
-            if frequency_choice == '1':
-                join_frequency = 'every_hour'
-                await log_channel.send("Join frequency set to: Every Hour")
-            elif frequency_choice == '2': 
-                timezones = [
-                    "UTC -12 {ANAT}", "UTC -11 {AEDT}", "UTC -10 {HAST}", "UTC -9 {AKST}", "UTC -8 {PST}",
-                    "UTC -7 {MST}", "UTC -6 {CST}", "UTC -5 {EST}", "UTC -4 {AST}", "UTC -3 {BRT}",
-                    "UTC -2 {GST}", "UTC -1 {AZOT}", "UTC 0 {GMT}", "UTC +1 {CET}", "UTC +2 {EET}",
-                    "UTC +3 {MSK}", "UTC +4 {GST}", "UTC +5 {PKT}", "UTC +6 {BST}", "UTC +7 {ICT}",
-                    "UTC +8 {ChinaST}", "UTC +9 {JST}", "UTC +10 {AEST}", "UTC +11 {AEDT}", "UTC +12 {NZST}"
-                ]
-                embed = discord.Embed(title="Available Timezones", color=discord.Color.blue())
-                for i, tz in enumerate(timezones, 1):
-                    tz_offset = int(tz.split()[1].replace('UTC', '').replace('{', '').replace('}', ''))
-                    current_time = datetime.now(timezone(timedelta(hours=tz_offset))).strftime('%I:%M %p')
-                    embed.add_field(name=f"[{i}] {tz}", value=f"`Current Time: {current_time}`", inline=False)
-                await log_channel.send(embed=embed)
-                await log_channel.send("Please choose one or more timezones by entering their numbers separated by spaces (e.g., 1 3 10):")
+        join_frequency = None
+        join_timezones = server_config.get('join_timezones', [])  # Preserve existing timezones unless changed
 
-                try:
-                    tz_msg = await bot.wait_for('message', timeout=60.0, check=check_message)
-                    chosen_tz_indices = [int(i) for i in tz_msg.content.strip().split()]
-                    chosen_timezones = [timezones[i-1] for i in chosen_tz_indices]
+        if frequency_choice == '1':
+            join_frequency = 'every_hour'
+            await log_channel.send("Join frequency set to: Every Hour")
+        elif frequency_choice == '2':
+            timezones = [
+                "UTC -12 {ANAT}", "UTC -11 {AEDT}", "UTC -10 {HAST}", "UTC -9 {AKST}", "UTC -8 {PST}",
+                "UTC -7 {MST}", "UTC -6 {CST}", "UTC -5 {EST}", "UTC -4 {AST}", "UTC -3 {BRT}",
+                "UTC -2 {GST}", "UTC -1 {AZOT}", "UTC 0 {GMT}", "UTC +1 {CET}", "UTC +2 {EET}",
+                "UTC +3 {MSK}", "UTC +4 {GST}", "UTC +5 {PKT}", "UTC +6 {BST}", "UTC +7 {ICT}",
+                "UTC +8 {ChinaST}", "UTC +9 {JST}", "UTC +10 {AEST}", "UTC +11 {AEDT}", "UTC +12 {NZST}"
+            ]
+            embed = discord.Embed(title="Available Timezones", color=discord.Color.blue())
+            for i, tz in enumerate(timezones, 1):
+                tz_offset = int(tz.split()[1].replace('UTC', '').replace('{', '').replace('}', ''))
+                current_time = datetime.now(timezone(timedelta(hours=tz_offset))).strftime('%I:%M %p')
+                embed.add_field(name=f"[{i}] {tz}", value=f"`Current Time: {current_time}`", inline=False)
+            await log_channel.send(embed=embed)
+            await log_channel.send("Please choose one or more timezones by entering their numbers separated by spaces (e.g., 1 3):")
 
-                    await log_channel.send(
-                        "The timezones you chose are:\n" +
-                        "\n".join([f"{tz} `Current Time: {datetime.now(timezone(timedelta(hours=int(tz.split()[1].replace('UTC', '').replace('{', '').replace('}', ''))))).strftime('%I:%M %p')}`" for tz in chosen_timezones]) +
-                        "\nAre you sure you want the bot to join during 4:20 in these timezones? (yes/no)"
-                    )
+            tz_msg = await bot.wait_for('message', timeout=60.0, check=check_message)
+            chosen_tz_indices = [int(i) for i in tz_msg.content.strip().split() if i.isdigit()]
+            chosen_timezones = [timezones[i-1] for i in chosen_tz_indices if 1 <= i <= len(timezones)]
 
-                    confirm_msg = await bot.wait_for('message', timeout=60.0, check=check_message)
-                    if confirm_msg.content.strip().lower() == 'yes':
-                        join_frequency = 'timezones'
-                        join_timezones = chosen_timezones
-                        await log_channel.send("Join frequency set to: Specific Timezones")
-                    else:
-                        await log_channel.send("Setup canceled.")
-                        return
-                except asyncio.TimeoutError:
-                    await log_channel.send("Setup timed out. Please run `/setup` again.")
-                    return
-            elif frequency_choice == '3':
-                join_frequency = 'manual'
-                await log_channel.send("Join frequency set to: Manual joins only")
-            else:
-                await log_channel.send("Invalid choice. Setup canceled.")
+            if not chosen_timezones:
+                await log_channel.send("No valid timezones selected. Setup canceled.")
                 return
-        except asyncio.TimeoutError:
-            await log_channel.send("Setup timed out. Please run `/setup` again.")
+
+            await log_channel.send(
+                "The timezones you chose are:\n" +
+                "\n".join([f"{tz} `Current Time: {datetime.now(timezone(timedelta(hours=int(tz.split()[1].replace('UTC', '').replace('{', '').replace('}', ''))))).strftime('%I:%M %p')}`" for tz in chosen_timezones]) +
+                "\nAre you sure you want the bot to join during 4:20 in these timezones? (yes/no)"
+            )
+
+            confirm_msg = await bot.wait_for('message', timeout=60.0, check=check_message)
+            if confirm_msg.content.strip().lower() == 'yes':
+                join_frequency = 'timezones'
+                join_timezones = chosen_timezones
+                await log_channel.send("Join frequency set to: Specific Timezones")
+            else:
+                await log_channel.send("Setup canceled.")
+                return
+        elif frequency_choice == '3':
+            join_frequency = 'manual'
+            await log_channel.send("Join frequency set to: Manual joins only")
+        else:
+            await log_channel.send("Invalid choice. Please enter 1, 2, or 3. Setup canceled.")
             return
 
-        # Step 5: Save Configuration
+        # Step 4: Update and Save Configuration
         server_config.update({
             'log_channel_id': log_channel_id,
             'admin_roles': role_ids,
@@ -1375,9 +1470,9 @@ async def setup(interaction: discord.Interaction, channel: discord.TextChannel):
             'join_frequency': join_frequency,
             'join_timezones': join_timezones if join_frequency == 'timezones' else []
         })
-        save_config(interaction.guild.id, server_config)
+        await save_config(interaction.guild.id, server_config)
 
-        # Load global config settings
+        # Load global config settings for embed
         with open(config_path, 'r') as f:
             global_config = json.load(f)
 
@@ -1386,20 +1481,43 @@ async def setup(interaction: discord.Interaction, channel: discord.TextChannel):
         footer_icon_url = log_settings.get("footer_icon_url", "https://i.imgur.com/4OO5wh0.png")
         guild_icon_url = interaction.guild.icon.url if interaction.guild.icon else footer_icon_url
 
-        # Confirmation Message
+        # Confirmation Embed
         embed = discord.Embed(
             title="Setup Complete",
-            description=(
-                f"**Log Channel:** <#{log_channel_id}>\n"
-                f"**Admin Roles:** {', '.join([f'<@&{role_id}>' for role_id in role_ids])}\n"
-                f"**Sound Mode:** {mode.capitalize()}\n"
-                f"**Join Frequency:** {join_frequency.capitalize()}"
-            ),
+            description="Here are the updated settings for this server:",
             color=discord.Color.green()
+        )
+        embed.add_field(name="Log Channel", value=f"<#{log_channel_id}>", inline=False)
+        embed.add_field(name="Admin Roles", value=', '.join([f'<@&{role_id}>' for role_id in role_ids]) or "None", inline=False)
+        embed.add_field(name="Sound Mode", value=mode.capitalize(), inline=False)
+        embed.add_field(
+            name="Join Frequency",
+            value=(
+                "Every Hour" if join_frequency == 'every_hour' else
+                f"Specific Timezones: {', '.join(join_timezones)}" if join_frequency == 'timezones' else
+                "Manual"
+            ),
+            inline=False
         )
         embed.set_thumbnail(url=guild_icon_url)
         embed.set_footer(text=footer_text, icon_url=footer_icon_url)
         await log_channel.send(embed=embed)
+
+        # Log the action
+        await log_action(
+            interaction.guild,
+            "Bot Setup",
+            f"Bot setup updated by {interaction.user.mention}.\n"
+            f"Log Channel: <#{log_channel_id}>\n"
+            f"Admin Roles: {', '.join([f'<@&{role_id}>' for role_id in role_ids])}\n"
+            f"Mode: {mode.capitalize()}\n"
+            f"Join Frequency: {join_frequency.replace('_', ' ').capitalize()}" +
+            (f"\nTimezones: {', '.join(join_timezones)}" if join_frequency == 'timezones' else ""),
+            interaction.user
+        )
+
+    except asyncio.TimeoutError:
+        await log_channel.send("Setup timed out. Please run `/setup` again.")
     except Exception as e:
         print(f"Error in setup: {e}")
         await log_channel.send(f"An error occurred: {e}")
@@ -1448,108 +1566,185 @@ async def leave(interaction: discord.Interaction):
     else:
         await interaction.response.send_message("Not connected to any voice channel.")
 
-class SingleSoundMenuView(discord.ui.View):
-    def __init__(self, interaction: discord.Interaction, available_sounds: list, server_config: dict):
-        super().__init__(timeout=60)
+class SoundButton(ui.Button):
+    def __init__(self, sound, enabled, server_config, row):
+        color = ButtonStyle.green if enabled else ButtonStyle.red
+        super().__init__(label=sound, style=color, row=row)
+        self.sound = sound
+        self.server_config = server_config
+
+    async def callback(self, interaction: Interaction):
+        # Toggle sound status
+        current_status = self.server_config.get(f"sound_status_{self.sound}", True)
+        self.server_config[f"sound_status_{self.sound}"] = not current_status
+
+        # Save updated config
+        save_config(interaction.guild.id, self.server_config)
+
+        # Update button color and text
+        self.style = ButtonStyle.green if not current_status else ButtonStyle.red
+        await interaction.response.edit_message(view=self.view)
+
+class SingleSoundButton(ui.Button):
+    def __init__(self, sound, server_config, row):
+        super().__init__(label=sound, style=ButtonStyle.blurple, row=row)
+        self.sound = sound
+        self.server_config = server_config
+
+    async def callback(self, interaction: Interaction):
+        # Set the selected sound as the default sound
+        self.server_config['default_sound'] = self.sound
+        save_config(interaction.guild.id, self.server_config)
+        await interaction.response.send_message(f"Default sound set to: {self.sound}", ephemeral=True)
+
+class SoundMenuView(ui.View):
+    def __init__(self, interaction, available_sounds, server_config, page=0):
+        super().__init__(timeout=180)  # 3 minutes timeout for interaction
         self.interaction = interaction
         self.available_sounds = available_sounds
         self.server_config = server_config
-        self.selected_sound = None
+        self.page = page
 
-        # Add buttons for each sound
-        for sound in available_sounds:
-            self.add_item(self.SoundButton(sound))
+        # Display the buttons for sounds (25 per page)
+        self.display_sounds()
 
-    class SoundButton(discord.ui.Button):
-        def __init__(self, sound: str):
-            super().__init__(label=sound, style=discord.ButtonStyle.primary)
-            self.sound = sound
+        # Pagination controls if there are more pages
+        if len(available_sounds) > 25:
+            self.add_item(ui.Button(label="Previous", style=ButtonStyle.blurple, row=5, 
+                                    disabled=self.page <= 0, callback=self.prev_page))
+            self.add_item(ui.Button(label="Next", style=ButtonStyle.blurple, row=5, 
+                                    disabled=(self.page + 1) * 25 >= len(available_sounds), 
+                                    callback=self.next_page))
 
-        async def callback(self, interaction: discord.Interaction):
-            view: SingleSoundMenuView = self.view
-            view.selected_sound = self.sound
-            view.server_config['default_sound'] = f"{self.sound}.mp3"
-            save_config(view.interaction.guild.id, view.server_config)
-            await interaction.response.edit_message(
-                content=f"Selected sound: {self.sound} for single mode.",
-                view=None
-            )
-            view.stop()
+    def display_sounds(self):
+        start_index = self.page * 25
+        end_index = start_index + 25
 
-    async def on_timeout(self):
-        if not self.selected_sound:
-            await self.interaction.edit_original_response(
-                content="No sound selected. Command timed out.",
-                view=None
-            )
+        for idx, sound in enumerate(self.available_sounds[start_index:end_index]):
+            enabled = self.server_config.get(f"sound_status_{sound}", True)
+            row = idx // 5  # 5 buttons per row
+            self.add_item(SoundButton(sound, enabled, self.server_config, row=row))
 
-class RandomSoundToggleView(discord.ui.View):
-    def __init__(self, interaction: discord.Interaction, available_sounds: list, server_config: dict):
-        super().__init__(timeout=60)
+    async def prev_page(self, interaction: Interaction):
+        self.page -= 1
+        await self.update_view(interaction)
+
+    async def next_page(self, interaction: Interaction):
+        self.page += 1
+        await self.update_view(interaction)
+
+    async def update_view(self, interaction: Interaction):
+        """Update the view when the page changes."""
+        self.clear_items()  # Clear all buttons before re-adding
+        self.display_sounds()
+        await interaction.response.edit_message(view=self)
+
+class SingleSoundMenuView(ui.View):
+    def __init__(self, interaction, available_sounds, server_config, page=0):
+        super().__init__(timeout=180)  # 3 minutes timeout for interaction
         self.interaction = interaction
         self.available_sounds = available_sounds
         self.server_config = server_config
+        self.page = page
 
-        # Add toggle buttons for each sound
-        for sound in available_sounds:
-            self.add_item(self.ToggleButton(sound, server_config))
+        # Display the buttons for sounds (25 per page)
+        self.display_sounds()
 
-    class ToggleButton(discord.ui.Button):
-        def __init__(self, sound: str, server_config: dict):
-            self.sound = sound
-            self.server_config = server_config
-            status = server_config.get(f'sound_status_{sound}.mp3', True)
-            super().__init__(
-                label=f"{sound} ({'On' if status else 'Off'})",
-                style=discord.ButtonStyle.green if status else discord.ButtonStyle.red
-            )
+        # Pagination controls if there are more pages
+        if len(available_sounds) > 25:
+            self.add_item(ui.Button(label="Previous", style=ButtonStyle.blurple, row=5, 
+                                    disabled=self.page <= 0, callback=self.prev_page))
+            self.add_item(ui.Button(label="Next", style=ButtonStyle.blurple, row=5, 
+                                    disabled=(self.page + 1) * 25 >= len(available_sounds), 
+                                    callback=self.next_page))
 
-        async def callback(self, interaction: discord.Interaction):
-            view: RandomSoundToggleView = self.view
-            current_status = view.server_config.get(f'sound_status_{self.sound}.mp3', True)
-            new_status = not current_status
-            view.server_config[f'sound_status_{self.sound}.mp3'] = new_status
-            self.style = discord.ButtonStyle.green if new_status else discord.ButtonStyle.red
-            self.label = f"{self.sound} ({'On' if new_status else 'Off'})"
-            save_config(view.interaction.guild.id, view.server_config)
-            await interaction.response.edit_message(view=view)
+    def display_sounds(self):
+        start_index = self.page * 25
+        end_index = start_index + 25
 
-    async def on_timeout(self):
-        await self.interaction.edit_original_response(
-            content="Sound selection timed out. Current settings saved.",
-            view=None
-        )
+        for idx, sound in enumerate(self.available_sounds[start_index:end_index]):
+            row = idx // 5  # 5 buttons per row
+            self.add_item(SingleSoundButton(sound, self.server_config, row=row))
 
-@bot.tree.command(name="sounds", description="Manage available sounds based on server mode.")
+    async def prev_page(self, interaction: Interaction):
+        self.page -= 1
+        await self.update_view(interaction)
+
+    async def next_page(self, interaction: Interaction):
+        self.page += 1
+        await self.update_view(interaction)
+
+    async def update_view(self, interaction: Interaction):
+        """Update the view when the page changes."""
+        self.clear_items()  # Clear all buttons before re-adding
+        self.display_sounds()
+        await interaction.response.edit_message(view=self)
+
+@bot.tree.command(name="sounds", description="List or toggle available sounds for random mode. Restricted to bot admins/developers.")
 async def sounds(interaction: discord.Interaction):
+    # Check if the server is blacklisted
     if is_server_blacklisted(interaction.guild.id):
         await handle_blacklisted_server(interaction)
         return
+    
+    # Ensure server setup is complete
     if not await ensure_setup(interaction):
         return
 
+    # Load server config
     server_config = load_or_create_server_config(interaction.guild.id)
-    mode = server_config.get('mode', 'single')
-    available_sounds = get_available_sounds()
 
-    # Strip the .mp3 extension from sound file names
-    available_sounds_no_ext = [sound.replace('.mp3', '') for sound in available_sounds]
-
-    if not available_sounds_no_ext:
-        await interaction.response.send_message("No sounds available in the sounds folder.", ephemeral=True)
-        return
-
-    if mode == 'single':
-        view = SingleSoundMenuView(interaction, available_sounds_no_ext, server_config)
+    # Check if user is a developer (universal access) or a server admin
+    if not (is_developer(interaction) or can_access_server_commands(interaction)):
         await interaction.response.send_message(
-            "Select the sound to use in single mode:",
-            view=view,
+            "You do not have permission to use this command. Only bot developers or server administrators can use it.",
             ephemeral=True
         )
-    else:  # mode == 'random'
-        view = RandomSoundToggleView(interaction, available_sounds_no_ext, server_config)
+        return
+
+    # Get the current mode and available sounds
+    mode = server_config.get("mode", "single")
+    available_sounds = get_available_sounds()
+
+    if mode == "single":
+        # If mode is single, inform the user that sound toggling is only for random mode
+        default_sound = server_config.get("default_sound", "Cheers_Bitch.mp3")
+        embed = discord.Embed(
+            title="Sounds Configuration",
+            description=(
+                f"The server is currently in **single** mode, using the sound: **{default_sound}**.\n"
+                "Sound toggling is only available in **random** mode. Use `/mode random` to switch modes."
+            ),
+            color=discord.Color.blue()
+        )
+        await interaction.response.send_message(embed=embed, ephemeral=True)
+    else:  # mode == "random"
+        # Define the SoundToggleButton class for random mode
+        class SoundToggleButton(ui.Button):
+            def __init__(self, sound, config):
+                status = config.get(f"sound_status_{sound}", True)
+                super().__init__(
+                    label=f"{sound.replace('.mp3', '')} [{'On' if status else 'Off'}]",
+                    style=ButtonStyle.green if status else ButtonStyle.red
+                )
+                self.sound = sound
+                self.config = config
+
+            async def callback(self, interaction: Interaction):
+                new_status = not self.config.get(f"sound_status_{self.sound}", True)
+                self.config[f"sound_status_{self.sound}"] = new_status
+                await save_config(interaction.guild.id, self.config)
+                self.style = ButtonStyle.green if new_status else ButtonStyle.red
+                self.label = f"{self.sound.replace('.mp3', '')} [{'On' if new_status else 'Off'}]"
+                await interaction.response.edit_message(view=self.view)
+
+        # Create a view with toggle buttons for each sound
+        view = ui.View()
+        for sound in available_sounds:
+            view.add_item(SoundToggleButton(sound, server_config))
+        
         await interaction.response.send_message(
-            "Toggle sounds to enable/disable for random mode:",
+            "Toggle sounds to enable/disable them for random mode:",
             view=view,
             ephemeral=True
         )
@@ -1571,21 +1766,54 @@ async def mode(interaction: discord.Interaction, mode: str):
         await interaction.response.send_message("Invalid mode. Please choose either `single` or `random`.", ephemeral=True)
         return
 
-    # Save the new mode to the config
+    # Update the mode in the config immediately
     server_config['mode'] = mode
+    await save_config(interaction.guild.id, server_config)
 
-    # Handle mode-specific logic
     available_sounds = get_available_sounds()
     if mode == "single":
-        view = SingleSoundMenuView(interaction, available_sounds, server_config)
-        await interaction.response.send_message("Select the default sound for single mode:", view=view, ephemeral=True)
+        class SingleSoundSelect(ui.Select):
+            def __init__(self, sounds, config):
+                options = [discord.SelectOption(label=sound.replace('.mp3', ''), value=sound) for sound in sounds]
+                super().__init__(placeholder="Choose a single sound...", min_values=1, max_values=1, options=options)
+                self.config = config
+
+            async def callback(self, interaction: Interaction):
+                selected_sound = self.values[0]
+                self.config['default_sound'] = selected_sound
+                await save_config(interaction.guild.id, self.config)
+                await interaction.response.edit_message(
+                    content=f"Mode set to Single. Default sound set to {selected_sound}.",
+                    view=None
+                )
+
+        view = ui.View()
+        view.add_item(SingleSoundSelect(available_sounds, server_config))
+        await interaction.response.send_message(
+            "Mode set to Single. Select the default sound below:",
+            view=view,
+            ephemeral=True
+        )
     elif mode == "random":
-        # Only set sound status to True for sounds that don't have a status yet
+        # Update config with available sounds, preserving existing statuses
         for sound in available_sounds:
-            if f'sound_status_{sound}' not in server_config:
-                server_config[f'sound_status_{sound}'] = True
-        save_config(interaction.guild.id, server_config)
-        await interaction.response.send_message(f"The mode has been set to {mode.capitalize()} for this server.", ephemeral=True)
+            # Only set status if it doesn't already exist in the config
+            if f"sound_status_{sound}" not in server_config:
+                server_config[f"sound_status_{sound}"] = True
+        await save_config(interaction.guild.id, server_config)
+        
+        # Check if there are any enabled sounds
+        enabled_sounds = [s for s in available_sounds if server_config.get(f"sound_status_{s}", True)]
+        if not enabled_sounds:
+            await interaction.response.send_message(
+                "Mode set to Random, but no sounds are enabled. Please use `/sounds` to enable at least one sound.",
+                ephemeral=True
+            )
+        else:
+            await interaction.response.send_message(
+                f"Mode set to Random for this server. Existing sound statuses preserved.",
+                ephemeral=True
+            )
 
 # /reload command, restricted to setup-listed users, administrators, and developers
 @bot.tree.command(name="reload", description="Reload and sync commands globally.")
@@ -1596,18 +1824,20 @@ async def reload(interaction: discord.Interaction):
 
     await interaction.response.defer(ephemeral=True)
     try:
+        # Reload global config first
+        await reload_global_config()
+        logging.info("Global config reloaded.")
+
         # Reload command modules
         commands_dir = os.path.join(BASE_DIR, 'commands')
-        loaded_extensions = set(bot.extensions.keys())  # Track currently loaded extensions
+        loaded_extensions = set(bot.extensions.keys())
         for filename in os.listdir(commands_dir):
             if filename.endswith('.py'):
                 extension = f'commands.{filename[:-3]}'
                 try:
-                    # If already loaded, unload it first
                     if extension in loaded_extensions:
                         await bot.unload_extension(extension)
                         logging.info(f"Unloaded extension: {extension}")
-                    # Load (or reload) the extension
                     await bot.load_extension(extension)
                     logging.info(f"Loaded extension: {extension}")
                 except Exception as e:
@@ -1620,7 +1850,7 @@ async def reload(interaction: discord.Interaction):
         logging.info(f"Synced {len(synced)} commands globally.")
         await interaction.followup.send(
             f"Commands reloaded and synced globally. Synced {len(synced)} commands. "
-            f"Note: Updates may take up to an hour to propagate to all servers.",
+            f"Global config reloaded. Note: Updates may take up to an hour to propagate to all servers.",
             ephemeral=True
         )
     except Exception as e:
@@ -1663,38 +1893,32 @@ async def setup_info(interaction: discord.Interaction):
 
     await interaction.response.send_message(embed=embed)
 
-@bot.tree.command(name="cheers", description="Play the cheers sound in a voice channel.")
+@bot.tree.command(name="cheers", description="Play the cheers sound in a voice channel. (Bot Admins/Developers only)")
 @app_commands.describe(channel="The voice channel to join and play the sound.")
 async def cheers(interaction: discord.Interaction, channel: discord.VoiceChannel):
     if is_server_blacklisted(interaction.guild.id):
         await handle_blacklisted_server(interaction)
         return
+    
     if not await ensure_setup(interaction):
+        return
+    
+    if not check_admin_or_developer(interaction):
+        await interaction.response.send_message("You do not have permission to use this command. Only bot administrators and developers can use /cheers.", ephemeral=True)
         return
 
     try:
         await interaction.response.defer(ephemeral=True)
-
-        # Disconnect from any existing channel if different
         if interaction.guild.voice_client and interaction.guild.voice_client.channel != channel:
             await interaction.guild.voice_client.disconnect()
 
         vc = interaction.guild.voice_client or await channel.connect()
         await interaction.followup.send(f"Joined {channel.name} successfully!", ephemeral=True)
-
-        # Play sound based on server's mode and leave
-        await play_sound_and_leave(interaction.guild, vc, interaction.user)
-        increment_manual_smoke_seshes_count()
+        await play_sound_and_leave(interaction.guild, vc, interaction.user, is_automatic=False)
+        await increment_manual_smoke_seshes_count()
     except Exception as e:
         await interaction.followup.send(f"Failed to join or play: {e}", ephemeral=True)
         print(f"Error during /cheers in {interaction.guild.name}: {e}")
-        
-        increment_manual_smoke_seshes_count()  # Increment the manual smoke seshes count
-    except Exception as e:
-        if not interaction.response.is_done():
-            await interaction.followup.send(f"Failed to join: {e}", ephemeral=True)
-        else:
-            print(f"Error during /cheers command: {e}")
 
 @bot.tree.command(name="meetthedev", description="Meet the developer of CheersBot.")
 async def meetthedev(interaction: discord.Interaction):
@@ -1770,23 +1994,19 @@ async def sync(ctx):
         return
 
     try:
-        # Sync commands globally
+        await reload_global_config()  # Add here
+        print("Global config reloaded.")
         print("Syncing...")
         synced = await bot.tree.sync()
         command_count = len(synced)
-
-        # Update server list and regenerate invite links
         await update_server_list()
-
-        # Generate a summary of the sync operation
         server_count = len(bot.guilds)
-        await ctx.send(f"Successfully synced {command_count} commands to {server_count} servers.")
+        await ctx.send(f"Successfully synced {command_count} commands to {server_count} servers. Config reloaded.")
         print(f"Successfully synced {command_count} commands to {server_count} servers.")
     except Exception as e:
         await ctx.send(f"Failed to sync commands: {e}")
         print(f"Failed to sync commands: {e}")
 
-    # Output "Syncing..." every 10 seconds until syncing is complete
     while True:
         print("Syncing...")
         await asyncio.sleep(10)
@@ -1841,7 +2061,7 @@ async def test(interaction: discord.Interaction):
             try:
                 vc = await voice_channel.connect(reconnect=True)
                 await asyncio.sleep(15)
-                await play_sound_and_leave(guild, vc, interaction.user)
+                await play_sound_and_leave(guild, vc, interaction.user, is_automatic=False)
                 success_list.append(guild)
             except Exception as e:
                 print(f"Error during test join in {voice_channel.name} on {guild.name}: {e}")
@@ -2462,10 +2682,12 @@ def load_cheers_count():
     with open('cheers-count.json', 'r') as f:
         return json.load(f)
 
-# Save cheers count data
 def save_cheers_count(data):
-    with open('cheers-count.json', 'w') as f:
-        json.dump(data, f, indent=4)
+    try:
+        with open('cheers-count.json', 'w') as f:
+            json.dump(data, f, indent=4)
+    except Exception as e:
+        print(f"Error saving cheers-count.json: {e}")
 
 class CheersCountView(View):
     def __init__(self, seshes_disabled=False, sounds_disabled=False, local_disabled=False):
@@ -2485,6 +2707,9 @@ async def cheers_count(interaction: discord.Interaction):
     embed.add_field(name="It's 4:20 Somewhere!", value=f"`{its_420_somewhere_count}` times", inline=False)
     embed.add_field(name="Manual Cheers Count", value=f"`{manual_smoke_seshes_count}` times", inline=False)
     embed.add_field(name="Total Cheers Count", value=f"`{total_smoke_seshes_count}` times", inline=False)
+
+    if debug_mode:
+        print(f"Cheers Count - 420 Somewhere: {its_420_somewhere_count}, Manual: {manual_smoke_seshes_count}, Total: {total_smoke_seshes_count}")
 
     view = CheersCountView(seshes_disabled=True)
     await interaction.response.send_message(embed=embed, view=view)

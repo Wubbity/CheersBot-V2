@@ -2,15 +2,54 @@ import discord
 from discord import app_commands
 from discord.ext import commands  
 
-class PermissionsCog(commands.Cog):  
-    def __init__(self, bot):
+class PermissionsCog(commands.Cog):
+    def __init__(self, bot, global_config):
         self.bot = bot
+        self.global_config = global_config
 
-    @app_commands.command(name="permissions", description="Check the bot's permissions in this server.")
+    async def check_admin_or_developer(self, interaction: discord.Interaction) -> bool:
+        """Check if the user is a bot admin or developer."""
+        # Check if user is a developer
+        developer_ids = self.global_config.get("bot_developer_ids", [])
+        if str(interaction.user.id) in developer_ids:
+            print(f"User {interaction.user.id} is a developer.")
+            return True
+        
+        # Fetch the full member object to ensure accurate role data
+        try:
+            member = interaction.user if isinstance(interaction.user, discord.Member) else await interaction.guild.fetch_member(interaction.user.id)
+        except Exception as e:
+            print(f"Error fetching member {interaction.user.id}: {e}")
+            return False
+
+        # Load server config
+        server_config = self.bot.load_or_create_server_config(interaction.guild.id)
+        admin_roles = server_config.get('admin_roles', [])
+        print(f"Server admin roles: {admin_roles}")
+        print(f"User roles: {[role.id for role in member.roles]}")
+
+        # Check administrator permission or role match
+        is_admin = member.guild_permissions.administrator
+        has_admin_role = any(role.id in admin_roles for role in member.roles)
+        print(f"User {interaction.user.id} - Administrator: {is_admin}, Has admin role: {has_admin_role}")
+        
+        return is_admin or has_admin_role
+
+    @app_commands.command(name="permissions", description="Check the bot's permissions in this server. (Bot Admins/Developers only)")
     async def permissions(self, interaction: discord.Interaction):
+        print(f"Bot attributes: {dir(self.bot)}")
+        
+        # Defer response to avoid timeout
+        await interaction.response.defer(ephemeral=True)
+
         if self.bot.is_server_blacklisted(interaction.guild.id):
             await self.bot.handle_blacklisted_server(interaction)
             return
+        
+        if not await self.check_admin_or_developer(interaction):
+            await interaction.followup.send("You do not have permission to use this command. Only bot administrators and developers can use /permissions.", ephemeral=True)
+            return
+        
         if not await self.bot.ensure_setup(interaction):
             return
 
@@ -19,7 +58,7 @@ class PermissionsCog(commands.Cog):
             bot_member = guild.me
             perms = bot_member.guild_permissions
         except Exception as e:
-            await interaction.response.send_message(f"Error retrieving permissions: {e}", ephemeral=True)
+            await interaction.followup.send(f"Error retrieving permissions: {e}", ephemeral=True)
             return
 
         embed = discord.Embed(
@@ -50,12 +89,12 @@ class PermissionsCog(commands.Cog):
             status = "✔️" if has_perm else "❌"
             embed.add_field(name=f"{perm.replace('_', ' ').title()} {status}", value=desc, inline=False)
 
-        log_settings = self.bot.global_config.get("log_settings", {})
+        log_settings = getattr(self.bot, 'global_config', {}).get("log_settings", {})
         footer_text = log_settings.get("footer_text", "CheersBot V2.0 by HomiesHouse | Discord.gg/HomiesHouse")
         footer_icon_url = log_settings.get("footer_icon_url", "https://i.imgur.com/4OO5wh0.png")
         embed.set_footer(text=footer_text, icon_url=footer_icon_url)
 
-        await interaction.response.send_message(embed=embed, ephemeral=True)
+        await interaction.followup.send(embed=embed, ephemeral=True)
 
 async def setup(bot):
-    await bot.add_cog(PermissionsCog(bot))
+    await bot.add_cog(PermissionsCog(bot, bot.global_config))

@@ -6,8 +6,9 @@ import os
 import json
 
 class UptimeCog(commands.Cog):
-    def __init__(self, bot):
+    def __init__(self, bot, global_config):
         self.bot = bot
+        self.global_config = global_config
         self.start_time = datetime.now(timezone.utc)  # Record the time when the cog is initialized
         self.config_path = os.path.join(os.path.dirname(os.path.abspath(__file__)), '..', 'config.json')
 
@@ -88,7 +89,7 @@ class UptimeCog(commands.Cog):
             )
 
             # Load formatting from global config
-            log_settings = self.bot.global_config.get("log_settings", {})
+            log_settings = getattr(self.bot, 'global_config', {}).get("log_settings", {})
             footer_text = log_settings.get("footer_text", "CheersBot V2.0 by HomiesHouse | Discord.gg/HomiesHouse")
             footer_icon_url = log_settings.get("footer_icon_url", "https://i.imgur.com/4OO5wh0.png")
             thumbnail_url = log_settings.get("thumbnail_url", "https://i.imgur.com/4OO5wh0.png")
@@ -102,4 +103,4 @@ class UptimeCog(commands.Cog):
             print(f"Error in uptime command: {e}")
 
 async def setup(bot):
-    await bot.add_cog(UptimeCog(bot))
+    await bot.add_cog(UptimeCog(bot, bot.global_config))
