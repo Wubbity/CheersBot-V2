@@ -15,5 +15,7 @@
     "BetaGameMessage": true,
     "developer_dm_channel_id": "1321198651887980615",
     "developer_dm_role_id": "1326905833186918491",
-    "feedback_channel_id": "1315133468337770578"
+    "developer_voting_channel_id": "1355225336337662175",
+    "feedback_channel_id": "1315133468337770578",
+    "longest_uptime_seconds": 296513
 }

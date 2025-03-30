@@ -56,6 +56,7 @@ sys.stderr = PrintLogger()
 load_dotenv()
 BOT_TOKEN = os.getenv('DISCORD_BOT_TOKEN')
 MASTER_GUILD_ID = int(os.getenv('MASTER_GUILD_ID'))
+TOPGG_AUTH_CODE = os.getenv('TOPGG_AUTH_CODE')
 
 # Config directory for each server
 CONFIG_DIR = 'configs'
@@ -377,6 +378,8 @@ intents.messages = True
 
 bot = AutoShardedBot(command_prefix="!", intents=intents)
 
+bot.save_config = save_config
+
 # Add a prefix for the text command "sync"
 bot.command_prefix = "c."
 
@@ -516,7 +519,7 @@ async def on_ready():
     server_count = len(bot.guilds)
     await bot.change_presence(activity=discord.Activity(
         type=discord.ActivityType.watching,
-        name=f"{server_count} servers"
+        name=f"{server_count} seshes | /help /vote"
     ))
     print(f"Set status to 'Watching {server_count} servers'")
 
