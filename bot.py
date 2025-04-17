@@ -521,7 +521,7 @@ async def on_ready():
         type=discord.ActivityType.watching,
         name=f"{server_count} seshes | /help /vote"
     ))
-    print(f"Set status to 'Watching {server_count} servers'")
+    print(f"Set status to 'Watching {server_count} seshes | /help /vote")
 
     # Reload persistent feedback views
     feedback_views = load_feedback_views()
@@ -633,9 +633,9 @@ async def on_guild_join(guild):
     server_count = len(bot.guilds)
     await bot.change_presence(activity=discord.Activity(
         type=discord.ActivityType.watching,
-        name=f"{server_count} servers"
+        name=f"{server_count} seshes | /help /vote"
     ))
-    print(f"Updated status to 'Watching {server_count} servers' after joining {guild.name}")
+    print(f"Updated status to 'Watching {server_count} seshes after joining {guild.name}")
 
 @bot.event
 async def on_guild_remove(guild):
@@ -656,9 +656,9 @@ async def on_guild_remove(guild):
     server_count = len(bot.guilds)
     await bot.change_presence(activity=discord.Activity(
         type=discord.ActivityType.watching,
-        name=f"{server_count} servers"
+        name=f"{server_count} seshes | /help /vote"
     ))
-    print(f"Updated status to 'Watching {server_count} servers' after leaving {guild.name}")
+    print(f"Updated status to 'Watching {server_count} seshes after leaving {guild.name}")
 
 # Feedback command
 class ApproveButton(ui.Button):
@@ -824,6 +824,7 @@ class FeedbackView(ui.View):
 
 @bot.tree.command(name="feedback", description="Send feedback to the developers.")
 async def feedback(interaction: discord.Interaction):
+    # Check if user is banned from feedback
     feedback_bans = load_feedback_bans()
     if str(interaction.user.id) in feedback_bans:
         reason = feedback_bans[str(interaction.user.id)]
@@ -835,10 +836,12 @@ async def feedback(interaction: discord.Interaction):
         await interaction.response.send_message(embed=embed, ephemeral=True)
         return
 
+    # Check if server is blacklisted
     if is_server_blacklisted(interaction.guild.id):
         await handle_blacklisted_server(interaction)
         return
 
+    # Prompt user for feedback
     embed = discord.Embed(
         title="Feedback Command",
         description=(
@@ -855,6 +858,7 @@ async def feedback(interaction: discord.Interaction):
     try:
         feedback_msg = await bot.wait_for('message', timeout=300.0, check=check_message)
 
+        # Show "Working..." message
         working_embed = discord.Embed(
             title="Working...",
             description="Processing your feedback. Please wait. Adding images or audio files may take longer than expected.",
@@ -862,6 +866,7 @@ async def feedback(interaction: discord.Interaction):
         )
         working_message = await interaction.followup.send(embed=working_embed, ephemeral=True)
 
+        # Prepare feedback embed
         feedback_embed = discord.Embed(
             title="User Feedback",
             description=f"{feedback_msg.content}\n\nFeedback from <@{interaction.user.id}>",
@@ -869,16 +874,17 @@ async def feedback(interaction: discord.Interaction):
         )
         feedback_embed.set_author(name=interaction.user.name, icon_url=interaction.user.avatar.url)
 
+        # Load global config settings
         with open(config_path, 'r') as f:
             global_config = json.load(f)
         log_settings = global_config.get("log_settings", {})
         footer_text = log_settings.get("footer_text", "CheersBot V2.0 by HomiesHouse | Discord.gg/HomiesHouse")
         footer_icon_url = log_settings.get("footer_icon_url", "https://i.imgur.com/4OO5wh0.png")
         thumbnail_url = log_settings.get("thumbnail_url", "https://i.imgur.com/4OO5wh0.png")
-
         feedback_embed.set_footer(text=footer_text, icon_url=footer_icon_url)
         feedback_embed.set_thumbnail(url=thumbnail_url)
 
+        # Handle attachments
         files = []
         image_count = 0
         audio_count = 0
@@ -892,29 +898,53 @@ async def feedback(interaction: discord.Interaction):
                 files.append(await attachment.to_file())
                 image_count += 1
 
+        # Send to feedback channel with robust error handling
         feedback_channel_id = global_config.get("feedback_channel_id")
         if not feedback_channel_id:
             raise ValueError("Feedback channel ID is not set in the configuration.")
-        feedback_channel = bot.get_channel(feedback_channel_id)
-        if feedback_channel:
-            feedback_msg_in_channel = await feedback_channel.send(embed=feedback_embed)
-            if files:
-                await feedback_channel.send(files=files)
-            if audio_files:
-                view = FeedbackView(feedback_embed, feedback_msg_in_channel, audio_files, interaction.user)
-                await feedback_msg_in_channel.edit(view=view)
-                
-                feedback_views = load_feedback_views()
-                feedback_views[str(feedback_msg_in_channel.id)] = {
-                    "channel_id": feedback_channel_id,
-                    "guild_id": interaction.guild.id,
-                    "user_id": interaction.user.id,
-                    "audio_files": [att.filename for att in audio_files],
-                    "embed": feedback_embed.to_dict()
-                }
-                save_feedback_views(feedback_views)
-                persistent_views[feedback_msg_in_channel.id] = view
 
+        feedback_channel = bot.get_channel(int(feedback_channel_id))
+        if not feedback_channel:
+            try:
+                feedback_channel = await bot.fetch_channel(int(feedback_channel_id))
+            except discord.errors.Forbidden:
+                print(f"Bot lacks permission to access feedback channel {feedback_channel_id}")
+            except discord.errors.NotFound:
+                print(f"Feedback channel {feedback_channel_id} does not exist")
+            except Exception as e:
+                print(f"Error fetching feedback channel {feedback_channel_id}: {e}")
+
+        if feedback_channel:
+            if str(feedback_channel.guild.id) != global_config.get("master_server_id"):
+                print(f"Feedback channel {feedback_channel_id} is in guild {feedback_channel.guild.id}, not master server {global_config.get('master_server_id')}")
+            if not feedback_channel.permissions_for(feedback_channel.guild.me).send_messages:
+                print(f"Bot lacks Send Messages permission in feedback channel {feedback_channel_id}")
+            elif not feedback_channel.permissions_for(feedback_channel.guild.me).embed_links:
+                print(f"Bot lacks Embed Links permission in feedback channel {feedback_channel_id}")
+            else:
+                try:
+                    feedback_msg_in_channel = await feedback_channel.send(embed=feedback_embed)
+                    if files:
+                        await feedback_channel.send(files=files)
+                    if audio_files:
+                        view = FeedbackView(feedback_embed, feedback_msg_in_channel, audio_files, interaction.user)
+                        await feedback_msg_in_channel.edit(view=view)
+                        feedback_views = load_feedback_views()
+                        feedback_views[str(feedback_msg_in_channel.id)] = {
+                            "channel_id": feedback_channel_id,
+                            "guild_id": interaction.guild.id,
+                            "user_id": interaction.user.id,
+                            "audio_files": [att.filename for att in audio_files],
+                            "embed": feedback_embed.to_dict()
+                        }
+                        save_feedback_views(feedback_views)
+                        persistent_views[feedback_msg_in_channel.id] = view
+                except discord.errors.HTTPException as e:
+                    print(f"Failed to send feedback to channel {feedback_channel_id}: {e}")
+        else:
+            print(f"Feedback channel {feedback_channel_id} not found or inaccessible")
+
+        # Clean up and confirm to user
         await feedback_msg.delete()
         await interaction.delete_original_response()
 
@@ -925,7 +955,11 @@ async def feedback(interaction: discord.Interaction):
         )
         if image_count > 0 or audio_count > 0:
             confirmation_embed.add_field(name="Attachments", value=f"{image_count} image(s), {audio_count} audio file(s)", inline=False)
-        confirmation_embed.add_field(name="Note", value="If you receive a friend request from <@171091643510816768>, I may be sending you a request to get more information on your feedback.", inline=False)
+        confirmation_embed.add_field(
+            name="Note",
+            value="If you receive a friend request from <@171091643510816768>, I may be sending you a request to get more information on your feedback.",
+            inline=False
+        )
         await working_message.edit(embed=confirmation_embed)
         await asyncio.sleep(30)
         await working_message.delete()
