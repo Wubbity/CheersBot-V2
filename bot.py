@@ -26,31 +26,27 @@ from logging.handlers import TimedRotatingFileHandler
 cheers_count_lock = asyncio.Lock()
 config_lock = asyncio.Lock()
 
-BASE_DIR = os.path.dirname(os.path.abspath(__file__))  # Already defined, safe to use
+BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 LOG_DIR = os.path.join(BASE_DIR, "ConsoleLogs")
 if not os.path.exists(LOG_DIR):
     os.makedirs(LOG_DIR)
 
+# Configure logging for both file and AMP console
 log_filename = os.path.join(LOG_DIR, datetime.now().strftime("%Y-%m-%d") + ".log")
-handler = TimedRotatingFileHandler(log_filename, when="midnight", interval=1, backupCount=21)
-handler.suffix = "%Y-%m-%d.log"
-formatter = logging.Formatter('[%(asctime)s] %(message)s', datefmt='%Y-%m-%d %H:%M:%S')
-handler.setFormatter(formatter)
-
 logger = logging.getLogger()
 logger.setLevel(logging.INFO)
-logger.addHandler(handler)
 
-import sys
-class PrintLogger:
-    def write(self, message):
-        if message.strip():
-            logger.info(message.strip())
-    def flush(self):
-        pass
+# File handler for rotating logs
+file_handler = TimedRotatingFileHandler(log_filename, when="midnight", interval=1, backupCount=21)
+file_handler.suffix = "%Y-%m-%d.log"
+formatter = logging.Formatter('[%(asctime)s] %(message)s', datefmt='%Y-%m-%d %H:%M:%S')
+file_handler.setFormatter(formatter)
+logger.addHandler(file_handler)
 
-sys.stdout = PrintLogger()
-sys.stderr = PrintLogger()
+# Stream handler for AMP console
+stream_handler = logging.StreamHandler()
+stream_handler.setFormatter(formatter)
+logger.addHandler(stream_handler)
 
 # Load environment variables
 load_dotenv()
@@ -64,7 +60,6 @@ if not os.path.exists(CONFIG_DIR):
     os.makedirs(CONFIG_DIR)
 
 # Detect the current operating system
-BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 config_path = os.path.join(BASE_DIR, "config.json")
 SOUND_FOLDER = os.path.abspath(os.path.join(BASE_DIR, "cheers_sounds"))
 current_os = platform.system()
@@ -137,7 +132,7 @@ async def handle_blacklisted_server(interaction):
     
     with open(config_path, 'r') as f:
         global_config = json.load(f)
-    developer_id = global_config.get("bot_developer_ids", [])[0]  # Get the first developer ID
+    developer_id = global_config.get("bot_developer_ids", [])[0]
 
     embed = discord.Embed(
         title="Server Blacklisted",
@@ -152,49 +147,41 @@ def load_developer_ids():
         global_config = json.load(f)
     return global_config.get("bot_developer_ids", [])
 
-# Update ffmpeg path for Windows and Linux dynamically based on the detected OS
+# Update ffmpeg path for Windows and Linux
 if current_os == "Windows":
-    ffmpeg_path = os.path.join(BASE_DIR, "FFMPEG", "ffmpeg.exe")  # Windows executable
-#elif current_os == "Linux":
-#   ffmpeg_path = os.path.join("/usr/bin/", "ffmpeg")  # Default for Linux in /usr/bin
+    ffmpeg_path = os.path.join(BASE_DIR, "FFMPEG", "ffmpeg.exe")
 elif current_os == "Linux":
-    ffmpeg_path = os.path.join(BASE_DIR, "FFMPEG", "ffmpeg")  # Linux in-folder installation
+    ffmpeg_path = os.path.join(BASE_DIR, "FFMPEG", "ffmpeg")
 else:
     raise OSError(f"Unsupported operating system: {current_os}")
 
-print(f"Sound folder path: {SOUND_FOLDER}")
-print(f"FFmpeg path: {ffmpeg_path}")
+logging.info(f"Sound folder path: {SOUND_FOLDER}")
+logging.info(f"FFmpeg path: {ffmpeg_path}")
 
 # Helper Functions for Configurations
 def get_config_filepath(guild_id):
     return os.path.join(CONFIG_DIR, f'config_{guild_id}.json')
 
 def load_or_create_server_config(guild_id):
-    """Load or create a server-specific configuration."""
     config_file = os.path.join(BASE_DIR, f"configs/config_{guild_id}.json")
-    
-    # If the config file exists, load it
-    if (os.path.exists(config_file)):
+    if os.path.exists(config_file):
         with open(config_file, 'r') as f:
             config = json.load(f)
     else:
-        # Default configuration for new servers
         config = {
             "log_channel_id": None,
             "admin_roles": [],
-            "mode": "single",  # Default mode is 'single'
+            "mode": "single",
             "default_sound": "Cheers_Bitch.mp3"
         }
         save_config(guild_id, config)
 
-    # Ensure all keys exist in case config file is missing any of them
     config.setdefault("log_channel_id", None)
     config.setdefault("admin_roles", [])
     config.setdefault("mode", "single")
     config.setdefault("default_sound", "Cheers_Bitch.mp3")
     config.setdefault("blacklist_channels", [])
     config.setdefault("local_cheers_count", 0)
-
     return config
 
 async def update_server_list():
@@ -215,37 +202,30 @@ async def update_server_list():
                         invite_url = "No Invites"
                 except discord.Forbidden:
                     if debug_mode:
-                        print(f"Could not retrieve invites for {guild.name}")
+                        logging.info(f"Could not retrieve invites for {guild.name}")
                     invite_url = "No Permission"
                 f.write(f"{guild.name} (ID: {guild.id}) | Joined: {join_date} | Server Owner ID: {owner_id} | Total Members: {total_members} | Total Bots: {total_bots} | Invite: {invite_url}\n")
     except Exception as e:
-        print(f"Error updating ServerList.log: {e}")
+        logging.error(f"Error updating ServerList.log: {e}")
 
 def update_master_server_summary():
-    """Updates the summary at the bottom of the MASTERServerList.log."""
     try:
         with open(MASTER_SERVER_LIST_PATH, 'r') as f:
             lines = f.readlines()
 
-        # Filter valid server entries (ignoring summary lines)
         server_entries = [line for line in lines if 'ID:' in line]
-
         total_servers_ever = len(set(line.split('ID: ')[1].split(')')[0] for line in server_entries))
         current_servers = len(bot.guilds)
 
         summary = f"\nTotal Servers Joined Ever: {total_servers_ever}\nCurrent Active Servers: {current_servers}\n"
-
-        # Rewrite the log file without previous summaries
         with open(MASTER_SERVER_LIST_PATH, 'w') as f:
-            f.writelines(server_entries)  # Write all valid entries
-            f.write(summary)  # Append the updated summary
-
+            f.writelines(server_entries)
+            f.write(summary)
     except Exception as e:
-        print(f"Error updating MASTERServerList summary: {e}")
+        logging.error(f"Error updating MASTERServerList summary: {e}")
 
 def log_to_master_server_list(action, guild, reason=None, invite=None):
     existing_servers = load_master_server_list()
-
     if str(guild.id) not in existing_servers:
         timestamp = datetime.now(pytz.timezone('America/Chicago')).strftime("%Y-%m-%d %H:%M:%S CST")
         entry = f"[{timestamp}] {action}: {guild.name} (ID: {guild.id})"
@@ -253,25 +233,21 @@ def log_to_master_server_list(action, guild, reason=None, invite=None):
             entry += f" | Reason: {reason}"
         if invite:
             entry += f" | Invite: {invite}"
-
         try:
             with open(MASTER_SERVER_LIST_PATH, 'a') as f:
                 f.write(entry + "\n")
         except Exception as e:
-            print(f"Error logging to MASTERServerList.log: {e}")
+            logging.error(f"Error logging to MASTERServerList.log: {e}")
     else:
-        # Update existing entry with new join time if reinvited
         timestamp = datetime.now(pytz.timezone('America/Chicago')).strftime("%Y-%m-%d %H:%M:%S CST")
         entry = f"[{timestamp}] {action}: {guild.name} (ID: {guild.id})"
         if reason:
             entry += f" | Reason: {reason}"
         if invite:
             entry += f" | Invite: {invite}"
-
         try:
             with open(MASTER_SERVER_LIST_PATH, 'r') as f:
                 lines = f.readlines()
-
             with open(MASTER_SERVER_LIST_PATH, 'w') as f:
                 for line in lines:
                     if f"(ID: {guild.id})" in line:
@@ -279,25 +255,18 @@ def log_to_master_server_list(action, guild, reason=None, invite=None):
                     else:
                         f.write(line)
         except Exception as e:
-            print(f"Error updating MASTERServerList.log: {e}")
-
-    # Ensure the invite link is also logged in the current server list
+            logging.error(f"Error updating MASTERServerList.log: {e}")
     asyncio.create_task(update_server_list())
 
 async def create_unlimited_invite(guild):
-    """Creates an unlimited invite link if the bot has permission."""
     try:
-        # Find a general channel to create the invite (first channel the bot can access)
         for channel in guild.text_channels:
             if channel.permissions_for(guild.me).create_instant_invite:
-                invite = await channel.create_invite(max_age=0, max_uses=0)  # Unlimited invite
+                invite = await channel.create_invite(max_age=0, max_uses=0)
                 return invite.url
     except Exception as e:
-        print(f"Error creating invite for {guild.name}: {e}")
+        logging.error(f"Error creating invite for {guild.name}: {e}")
     return "Could not create invite link"
-
-    # Update the summary after logging
-    update_master_server_summary()
 
 async def save_config(guild_id, config_data):
     async with config_lock:
@@ -309,40 +278,35 @@ def get_available_sounds():
     return [f for f in os.listdir(SOUND_FOLDER) if f.endswith('.mp3')]
 
 async def log_action(guild, title, description, user):
-    """Logs the action with a consistent timezone-aware timestamp."""
     server_config = load_or_create_server_config(guild.id)
     log_channel_id = server_config.get('log_channel_id')
-
     if not log_channel_id:
-        return  # No log channel set
-
+        return
     log_channel = bot.get_channel(log_channel_id)
     if not log_channel:
-        return  # Channel not found
-
-    # Load global config settings
+        return
     with open(config_path, 'r') as f:
         global_config = json.load(f)
-
     log_settings = global_config.get("log_settings", {})
     footer_text = log_settings.get("footer_text", "CheersBot V2.0 by HomiesHouse | Discord.gg/HomiesHouse")
     footer_icon_url = log_settings.get("footer_icon_url", "https://i.imgur.com/4OO5wh0.png")
     thumbnail_url = log_settings.get("thumbnail_url", "https://i.imgur.com/4OO5wh0.png")
     guild_icon_url = guild.icon.url if guild.icon else thumbnail_url
-
-    # Create the embed with the correct timestamp
     embed = discord.Embed(
         title=title,
         description=description,
-        timestamp=datetime.now(timezone.utc),  # Consistent timestamp
+        timestamp=datetime.now(timezone.utc),
         color=discord.Color.blue()
     )
     embed.set_thumbnail(url=guild_icon_url)
     embed.set_author(name=f"{guild.name} Logs", icon_url=guild_icon_url, url="https://discord.gg/HomiesHouse")
     embed.set_footer(text=footer_text, icon_url=footer_icon_url)
     embed.add_field(name="Executed by", value=user.mention, inline=True)
-
-    # Send the embed only once
+    embed.add_field(
+        name="Discover More Servers!",
+        value="Looking for more servers? Check the Serverlist using `/serverlist-view` or add your server to the serverlist using `/vote` and `/buy servertime`.",
+        inline=False
+    )
     await log_channel.send(embed=embed)
 
 def can_access_server_commands(interaction):
@@ -353,34 +317,29 @@ def can_access_server_commands(interaction):
     )
 
 def load_master_server_list():
-    """Loads the contents of the MASTERServerList.log into a dictionary."""
     servers = {}
     if os.path.exists(MASTER_SERVER_LIST_PATH):
         with open(MASTER_SERVER_LIST_PATH, 'r') as f:
             for line in f:
                 try:
-                    # Extract server ID from the line if it matches the expected pattern
                     if 'ID:' in line:
-                        parts = line.strip().split('ID: ')[1]  # Extract part after 'ID: '
-                        server_id = parts.split(')')[0]  # Get the server ID before the closing parenthesis
+                        parts = line.strip().split('ID: ')[1]
+                        server_id = parts.split(')')[0]
                         servers[server_id] = line.strip()
                 except (IndexError, ValueError) as e:
-                    print(f"Error parsing line in MASTERServerList.log: {line} | Error: {e}")
+                    logging.error(f"Error parsing line in MASTERServerList.log: {line} | Error: {e}")
     return servers
 
 # Set up Intents and Bot Object
 intents = discord.Intents.default()
-intents.message_content = True  # Enable message content intent
+intents.message_content = True
 intents.voice_states = True
 intents.guilds = True
 intents.members = True
 intents.messages = True
 
 bot = AutoShardedBot(command_prefix="!", intents=intents)
-
 bot.save_config = save_config
-
-# Add a prefix for the text command "sync"
 bot.command_prefix = "c."
 
 def is_developer(interaction: discord.Interaction) -> bool:
@@ -390,15 +349,11 @@ def is_developer(interaction: discord.Interaction) -> bool:
     return str(interaction.user.id) in developer_ids
 
 def check_admin_or_developer(interaction: discord.Interaction) -> bool:
-    """Check if the user is a bot admin or developer."""
-    # Check if user is a developer
     with open(config_path, 'r') as f:
         global_config = json.load(f)
     developer_ids = global_config.get("bot_developer_ids", [])
     if str(interaction.user.id) in developer_ids:
         return True
-    
-    # Check if user is a bot admin
     server_config = load_or_create_server_config(interaction.guild.id)
     admin_roles = server_config.get('admin_roles', [])
     return (
@@ -407,7 +362,6 @@ def check_admin_or_developer(interaction: discord.Interaction) -> bool:
     )
 
 def is_setup_complete(guild_id):
-    """Check if the setup is complete for the given guild."""
     config_file = get_config_filepath(guild_id)
     if not os.path.exists(config_file):
         return False
@@ -416,7 +370,6 @@ def is_setup_complete(guild_id):
     return config.get('log_channel_id') is not None and config.get('admin_roles')
 
 async def ensure_setup(interaction: discord.Interaction):
-    """Ensure the setup is complete before proceeding with any command."""
     if not is_setup_complete(interaction.guild.id):
         await interaction.response.send_message("Please run the /setup command before using CheersBot.", ephemeral=True)
         return False
@@ -427,7 +380,6 @@ def load_global_config():
         return json.load(f)
 
 global_config = load_global_config()
-
 bot.global_config = global_config
 bot.is_server_blacklisted = is_server_blacklisted
 bot.handle_blacklisted_server = handle_blacklisted_server
@@ -438,11 +390,9 @@ bot.load_or_create_server_config = load_or_create_server_config
 async def reload_global_config():
     bot.global_config = load_global_config()
 
-# Load master server ID from config.json
 master_server_id = global_config.get("master_server_id")
 
 def create_and_populate_server_logs():
-    """Create and populate server log files if they do not exist."""
     if not os.path.exists(SERVER_LIST_PATH):
         with open(SERVER_LIST_PATH, 'w') as f:
             for guild in bot.guilds:
@@ -451,7 +401,6 @@ def create_and_populate_server_logs():
                 total_bots = sum(1 for member in guild.members if member.bot)
                 join_date = guild.me.joined_at.astimezone(pytz.timezone('America/Chicago')).strftime("%Y-%m-%d %H:%M:%S CST")
                 f.write(f"{guild.name} (ID: {guild.id}) | Joined: {join_date} | Server Owner ID: {owner_id} | Total Members: {total_members} | Total Bots: {total_bots}\n")
-
     if not os.path.exists(MASTER_SERVER_LIST_PATH):
         with open(MASTER_SERVER_LIST_PATH, 'w') as f:
             for guild in bot.guilds:
@@ -462,28 +411,23 @@ def create_and_populate_server_logs():
                 f.write(f"{guild.name} (ID: {guild.id}) | Joined: {join_date} | Server Owner ID: {owner_id} | Total Members: {total_members} | Total Bots: {total_bots}\n")
             update_master_server_summary()
 
-# Function to load extensions
 async def load_extensions():
     for filename in os.listdir(os.path.join(BASE_DIR, 'commands')):
         if filename.endswith('.py'):
             try:
                 await bot.load_extension(f'commands.{filename[:-3]}')
-                print(f'Loaded extension: {filename}')
+                logging.info(f'Loaded extension: {filename}')
             except Exception as e:
-                print(f'Failed to load extension {filename}: {e}')
+                logging.error(f'Failed to load extension {filename}: {e}')
 
-# Time Logging Task
 @tasks.loop(seconds=1)
 async def log_current_time_task():
-    """Log the current time every 5 minutes."""
     now = datetime.now(timezone.utc)
     if now.minute % 5 == 0 and now.second == 0:
-        print(f"Current time is {now.strftime('%H:%M')}")
+        logging.info(f"Current time is {now.strftime('%H:%M')}")
 
-# Initialize the scheduler
 scheduler = AsyncIOScheduler()
 
-# Function to schedule join tasks
 def schedule_join_tasks():
     for guild in bot.guilds:
         if is_server_blacklisted(guild.id):
@@ -491,7 +435,6 @@ def schedule_join_tasks():
         server_config = load_or_create_server_config(guild.id)
         join_frequency = server_config.get('join_frequency', 'every_hour')
         if join_frequency == 'every_hour':
-            # Handled by auto_join_task
             pass
         elif join_frequency == 'timezones':
             join_timezones = server_config.get('join_timezones', [])
@@ -502,13 +445,13 @@ def schedule_join_tasks():
                     scheduler.add_job(join_and_play_420, 'cron', hour=4, minute=20, timezone=tz_obj, args=[guild])
                     scheduler.add_job(join_and_play_420, 'cron', hour=16, minute=20, timezone=tz_obj, args=[guild])
                 except (IndexError, ValueError) as e:
-                    print(f"Invalid timezone format for {guild.name}: {tz} - {e}")
+                    logging.error(f"Invalid timezone format for {guild.name}: {tz} - {e}")
         elif join_frequency == 'manual':
             pass
 
 @bot.event
 async def on_ready():
-    print(f"Logged in as {bot.user}!")
+    logging.info(f"Logged in as {bot.user}!")
     await load_extensions()
     create_and_populate_server_logs()
     await update_server_list()
@@ -521,9 +464,8 @@ async def on_ready():
         type=discord.ActivityType.watching,
         name=f"{server_count} seshes | /help /vote"
     ))
-    print(f"Set status to 'Watching {server_count} seshes | /help /vote")
+    logging.info(f"Set status to 'Watching {server_count} seshes | /help /vote")
 
-    # Reload persistent feedback views
     feedback_views = load_feedback_views()
     for message_id, data in feedback_views.items():
         try:
@@ -538,36 +480,36 @@ async def on_ready():
             view = FeedbackView(embed, message, audio_files, user)
             await message.edit(view=view)
             persistent_views[int(message_id)] = view
-            print(f"Reloaded persistent view for message {message_id}")
+            logging.info(f"Reloaded persistent view for message {message_id}")
         except Exception as e:
-            print(f"Failed to reload view for message {message_id}: {e}")
+            logging.error(f"Failed to reload view for message {message_id}: {e}")
 
     if not scheduler.running:
         scheduler.start()
-        print("Scheduler started in on_ready.")
+        logging.info("Scheduler started in on_ready.")
         schedule_join_tasks()
     else:
-        print("Scheduler already running, skipping start.")
+        logging.info("Scheduler already running, skipping start.")
 
     if debug_mode:
-        print("Debug mode enabled. Listing first 20 servers:")
+        logging.info("Debug mode enabled. Listing first 20 servers:")
         for i, guild in enumerate(bot.guilds[:20]):
-            print(f"{i+1}. {guild.name} (ID: {guild.id})")
+            logging.info(f"{i+1}. {guild.name} (ID: {guild.id})")
         if len(bot.guilds) > 50:
-            print(f"Total number of servers: {len(bot.guilds)}")
-        print(f"Sound folder path: {SOUND_FOLDER}")
-        print(f"Configs folder path: {CONFIG_DIR}")
-        print(f"Server logs directory: {SERVER_LOG_DIR}")
-        print(f"Server list path: {SERVER_LIST_PATH}")
-        print(f"Master server list path: {MASTER_SERVER_LIST_PATH}")
+            logging.info(f"Total number of servers: {len(bot.guilds)}")
+        logging.info(f"Sound folder path: {SOUND_FOLDER}")
+        logging.info(f"Configs folder path: {CONFIG_DIR}")
+        logging.info(f"Server logs directory: {SERVER_LOG_DIR}")
+        logging.info(f"Server list path: {SERVER_LIST_PATH}")
+        logging.info(f"Master server list path: {MASTER_SERVER_LIST_PATH}")
     else:
-        print("Debug mode is disabled.")
+        logging.info("Debug mode is disabled.")
 
     try:
         await bot.tree.sync()
-        print("Commands synced successfully.")
+        logging.info("Commands synced successfully.")
     except Exception as e:
-        print(f"Failed to sync commands: {str(e)}")
+        logging.error(f"Failed to sync commands: {str(e)}")
 
     now = datetime.now(timezone.utc)
     if now.minute >= 15 and now.minute < 20:
@@ -576,20 +518,17 @@ async def on_ready():
             if server_config.get('join_frequency', 'every_hour') == 'every_hour':
                 await join_all_populated_voice_channels(guild)
 
-# Cleanup function to save views on bot shutdown
 def save_views_on_exit():
     save_feedback_views({str(k): v for k, v in persistent_views.items()})
 
 atexit.register(save_views_on_exit)
 
 async def send_intro_message(guild):
-    """Send an introductory message to the appropriate channel."""
     intro_message = (
         "Thank you for adding CheersBot to your server! To start using CheersBot, please run the `/setup` command.\n"
         "If you need any help, feel free to reach out to the support team.\n\n"
         "HomiesHouse is also looking for 420 related servers to partner with. If you're interested, please reach out to us by directly messaging the bot."
     )
-
     embed = discord.Embed(
         title="Welcome to CheersBot V2!",
         description=intro_message,
@@ -597,21 +536,16 @@ async def send_intro_message(guild):
     )
     embed.set_thumbnail(url="https://i.imgur.com/4OO5wh0.png")
     embed.set_footer(text="CheersBot V2.0 by HomiesHouse | Discord.gg/HomiesHouse", icon_url="https://i.imgur.com/4OO5wh0.png")
-
-    # Try to find a moderator-only channel
     mod_channel = None
     for channel in guild.text_channels:
         if "mod" in channel.name.lower() or "admin" in channel.name.lower():
             mod_channel = channel
             break
-
-    # If no moderator-only channel is found, use the first available text channel
     target_channel = mod_channel or guild.text_channels[0]
-
     try:
         await target_channel.send(embed=embed)
     except Exception as e:
-        print(f"Error sending intro message to {guild.name}: {e}")
+        logging.error(f"Error sending intro message to {guild.name}: {e}")
 
 @bot.event
 async def on_guild_join(guild):
@@ -622,45 +556,35 @@ async def on_guild_join(guild):
         if invite:
             invite_url = invite.url
     except discord.Forbidden:
-        print(f"Could not retrieve invites for {guild.name}")
+        logging.error(f"Could not retrieve invites for {guild.name}")
         invite_url = "No Permission"
-
     log_to_master_server_list("Joined", guild, invite=invite_url)
     await update_server_list()
     await send_intro_message(guild)
-
-    # Update status with new server count
     server_count = len(bot.guilds)
     await bot.change_presence(activity=discord.Activity(
         type=discord.ActivityType.watching,
         name=f"{server_count} seshes | /help /vote"
     ))
-    print(f"Updated status to 'Watching {server_count} seshes after joining {guild.name}")
+    logging.info(f"Updated status to 'Watching {server_count} seshes after joining {guild.name}")
 
 @bot.event
 async def on_guild_remove(guild):
-    print(f"Left server: {guild.name} (ID: {guild.id})")
+    logging.info(f"Left server: {guild.name} (ID: {guild.id})")
     await update_server_list()
-
-    # Log server removal with reason (if available)
-    reason = "Left the server"  # General reason for leaving the server
+    reason = "Left the server"
     log_to_master_server_list("Left", guild, reason=reason)
-
-    # Delete the server configuration
     config_file = get_config_filepath(guild.id)
     if os.path.exists(config_file):
         os.remove(config_file)
-        print(f"Deleted config for {guild.name} (ID: {guild.id})")
-
-    # Update status with new server count
+        logging.info(f"Deleted config for {guild.name} (ID: {guild.id})")
     server_count = len(bot.guilds)
     await bot.change_presence(activity=discord.Activity(
         type=discord.ActivityType.watching,
         name=f"{server_count} seshes | /help /vote"
     ))
-    print(f"Updated status to 'Watching {server_count} seshes after leaving {guild.name}")
+    logging.info(f"Updated status to 'Watching {server_count} seshes after leaving {guild.name}")
 
-# Feedback command
 class ApproveButton(ui.Button):
     def __init__(self, feedback_embed, feedback_msg, audio_files, user):
         super().__init__(label="Approve", style=ButtonStyle.green)
@@ -678,7 +602,6 @@ class ApproveButton(ui.Button):
         ):
             await interaction.response.send_message("You do not have permission to use this command.", ephemeral=True)
             return
-
         try:
             await interaction.response.defer(ephemeral=True)
             await interaction.followup.send(
@@ -687,7 +610,7 @@ class ApproveButton(ui.Button):
                 ephemeral=True
             )
         except Exception as e:
-            print(f"Error in ApproveButton callback: {e}")
+            logging.error(f"Error in ApproveButton callback: {e}")
             await interaction.followup.send(f"An error occurred: {e}", ephemeral=True)
 
 class DenyButton(ui.Button):
@@ -706,13 +629,11 @@ class DenyButton(ui.Button):
         ):
             await interaction.response.send_message("You do not have permission to use this command.", ephemeral=True)
             return
-
         await interaction.response.defer(ephemeral=True)
         self.feedback_embed.color = discord.Color.red()
         self.feedback_embed.add_field(name="Status", value=f"Denied by {interaction.user.mention}", inline=False)
         await self.feedback_msg.edit(embed=self.feedback_embed, view=None)
         await interaction.followup.send("Feedback has been denied.", ephemeral=True)
-        # Remove from persistent views since action is complete
         if self.feedback_msg.id in persistent_views:
             del persistent_views[self.feedback_msg.id]
             feedback_views = load_feedback_views()
@@ -733,30 +654,24 @@ class ChangeSoundNameView(ui.View):
     @ui.button(label="Yes", style=ButtonStyle.green)
     async def yes_button(self, interaction: Interaction, button: ui.Button):
         await interaction.response.send_message("Please enter the new name for the sound (excluding the file extension).", ephemeral=True)
-
         def check_message(msg: discord.Message):
             return msg.author == interaction.user and msg.channel == interaction.channel
-
         try:
             new_name_msg = await bot.wait_for('message', timeout=60.0, check=check_message)
             new_name = new_name_msg.content.strip()
             if ' ' in new_name or '.' in new_name:
                 await interaction.followup.send("Invalid name. The name should not contain spaces or file extensions.", ephemeral=True)
                 return
-
             new_filename = f"{new_name}.mp3"
             new_filepath = os.path.join(SOUND_FOLDER, new_filename)
             await self.audio_files[self.current_file_index].save(new_filepath)
-
             self.feedback_embed.color = discord.Color.green()
             self.feedback_embed.add_field(name="Status", value=f"Approved by {interaction.user.mention}", inline=False)
             self.feedback_embed.add_field(name="Original Name", value=self.audio_files[self.current_file_index].filename, inline=False)
             self.feedback_embed.add_field(name="New Name", value=new_filename, inline=False)
             await self.feedback_msg.edit(embed=self.feedback_embed)
             await interaction.followup.send(f"Sound has been saved as {new_filename}.", ephemeral=True)
-
             await new_name_msg.delete()
-
             self.current_file_index += 1
             if self.current_file_index < len(self.audio_files):
                 await interaction.followup.send(
@@ -766,18 +681,16 @@ class ChangeSoundNameView(ui.View):
                 )
             else:
                 await interaction.followup.send("All audio files have been processed.", ephemeral=True)
-                # Remove from persistent views since action is complete
                 if self.feedback_msg.id in persistent_views:
                     del persistent_views[self.feedback_msg.id]
                     feedback_views = load_feedback_views()
                     if str(self.feedback_msg.id) in feedback_views:
                         del feedback_views[str(self.feedback_msg.id)]
                         save_feedback_views(feedback_views)
-
         except asyncio.TimeoutError:
             await interaction.followup.send("Renaming timed out. Please try again.", ephemeral=True)
         except Exception as e:
-            print(f"Error in yes_button: {e}")
+            logging.error(f"Error in yes_button: {e}")
             await interaction.followup.send(f"An error occurred: {e}", ephemeral=True)
 
     @ui.button(label="No", style=ButtonStyle.red)
@@ -785,13 +698,11 @@ class ChangeSoundNameView(ui.View):
         try:
             original_filepath = os.path.join(SOUND_FOLDER, self.audio_files[self.current_file_index].filename)
             await self.audio_files[self.current_file_index].save(original_filepath)
-
             self.feedback_embed.color = discord.Color.green()
             self.feedback_embed.add_field(name="Status", value=f"Approved by {interaction.user.mention}", inline=False)
             self.feedback_embed.add_field(name="Original Name", value=self.audio_files[self.current_file_index].filename, inline=False)
             await self.feedback_msg.edit(embed=self.feedback_embed)
             await interaction.response.send_message(f"Sound has been saved as {self.audio_files[self.current_file_index].filename}.", ephemeral=True)
-
             self.current_file_index += 1
             if self.current_file_index < len(self.audio_files):
                 await interaction.followup.send(
@@ -801,7 +712,6 @@ class ChangeSoundNameView(ui.View):
                 )
             else:
                 await interaction.followup.send("All audio files have been processed.", ephemeral=True)
-                # Remove from persistent views since action is complete
                 if self.feedback_msg.id in persistent_views:
                     del persistent_views[self.feedback_msg.id]
                     feedback_views = load_feedback_views()
@@ -809,12 +719,12 @@ class ChangeSoundNameView(ui.View):
                         del feedback_views[str(self.feedback_msg.id)]
                         save_feedback_views(feedback_views)
         except Exception as e:
-            print(f"Error in no_button: {e}")
+            logging.error(f"Error in no_button: {e}")
             await interaction.followup.send(f"An error occurred: {e}", ephemeral=True)
 
 class FeedbackView(ui.View):
     def __init__(self, feedback_embed, feedback_msg, audio_files, user):
-        super().__init__(timeout=None)  # Persistent view
+        super().__init__(timeout=None)
         self.feedback_embed = feedback_embed
         self.feedback_msg = feedback_msg
         self.audio_files = audio_files
@@ -824,7 +734,6 @@ class FeedbackView(ui.View):
 
 @bot.tree.command(name="feedback", description="Send feedback to the developers.")
 async def feedback(interaction: discord.Interaction):
-    # Check if user is banned from feedback
     feedback_bans = load_feedback_bans()
     if str(interaction.user.id) in feedback_bans:
         reason = feedback_bans[str(interaction.user.id)]
@@ -835,13 +744,9 @@ async def feedback(interaction: discord.Interaction):
         )
         await interaction.response.send_message(embed=embed, ephemeral=True)
         return
-
-    # Check if server is blacklisted
     if is_server_blacklisted(interaction.guild.id):
         await handle_blacklisted_server(interaction)
         return
-
-    # Prompt user for feedback
     embed = discord.Embed(
         title="Feedback Command",
         description=(
@@ -851,30 +756,22 @@ async def feedback(interaction: discord.Interaction):
         color=discord.Color.blue()
     )
     await interaction.response.send_message(embed=embed, ephemeral=True)
-
     def check_message(msg: discord.Message):
         return msg.author == interaction.user and msg.channel == interaction.channel
-
     try:
         feedback_msg = await bot.wait_for('message', timeout=300.0, check=check_message)
-
-        # Show "Working..." message
         working_embed = discord.Embed(
             title="Working...",
             description="Processing your feedback. Please wait. Adding images or audio files may take longer than expected.",
             color=discord.Color.orange()
         )
         working_message = await interaction.followup.send(embed=working_embed, ephemeral=True)
-
-        # Prepare feedback embed
         feedback_embed = discord.Embed(
             title="User Feedback",
             description=f"{feedback_msg.content}\n\nFeedback from <@{interaction.user.id}>",
             color=discord.Color.yellow()
         )
         feedback_embed.set_author(name=interaction.user.name, icon_url=interaction.user.avatar.url)
-
-        # Load global config settings
         with open(config_path, 'r') as f:
             global_config = json.load(f)
         log_settings = global_config.get("log_settings", {})
@@ -883,44 +780,38 @@ async def feedback(interaction: discord.Interaction):
         thumbnail_url = log_settings.get("thumbnail_url", "https://i.imgur.com/4OO5wh0.png")
         feedback_embed.set_footer(text=footer_text, icon_url=footer_icon_url)
         feedback_embed.set_thumbnail(url=thumbnail_url)
-
-        # Handle attachments
         files = []
         image_count = 0
         audio_count = 0
         audio_files = []
         for attachment in feedback_msg.attachments:
-            if attachment.filename.lower().endswith(('.mp3', '.m4a', '.wav', '.ogg')):
+            if attachment.filename.lower().endswith(('.mp3', '.m4a, .wav, .ogg')):
                 files.append(await attachment.to_file())
                 audio_count += 1
                 audio_files.append(attachment)
             elif attachment.filename.lower().endswith(('.png', '.jpg', '.jpeg', '.gif')):
                 files.append(await attachment.to_file())
                 image_count += 1
-
-        # Send to feedback channel with robust error handling
         feedback_channel_id = global_config.get("feedback_channel_id")
         if not feedback_channel_id:
             raise ValueError("Feedback channel ID is not set in the configuration.")
-
         feedback_channel = bot.get_channel(int(feedback_channel_id))
         if not feedback_channel:
             try:
                 feedback_channel = await bot.fetch_channel(int(feedback_channel_id))
             except discord.errors.Forbidden:
-                print(f"Bot lacks permission to access feedback channel {feedback_channel_id}")
+                logging.error(f"Bot lacks permission to access feedback channel {feedback_channel_id}")
             except discord.errors.NotFound:
-                print(f"Feedback channel {feedback_channel_id} does not exist")
+                logging.error(f"Feedback channel {feedback_channel_id} does not exist")
             except Exception as e:
-                print(f"Error fetching feedback channel {feedback_channel_id}: {e}")
-
+                logging.error(f"Error fetching feedback channel {feedback_channel_id}: {e}")
         if feedback_channel:
             if str(feedback_channel.guild.id) != global_config.get("master_server_id"):
-                print(f"Feedback channel {feedback_channel_id} is in guild {feedback_channel.guild.id}, not master server {global_config.get('master_server_id')}")
+                logging.error(f"Feedback channel {feedback_channel_id} is in guild {feedback_channel.guild.id}, not master server {global_config.get('master_server_id')}")
             if not feedback_channel.permissions_for(feedback_channel.guild.me).send_messages:
-                print(f"Bot lacks Send Messages permission in feedback channel {feedback_channel_id}")
+                logging.error(f"Bot lacks Send Messages permission in feedback channel {feedback_channel_id}")
             elif not feedback_channel.permissions_for(feedback_channel.guild.me).embed_links:
-                print(f"Bot lacks Embed Links permission in feedback channel {feedback_channel_id}")
+                logging.error(f"Bot lacks Embed Links permission in feedback channel {feedback_channel_id}")
             else:
                 try:
                     feedback_msg_in_channel = await feedback_channel.send(embed=feedback_embed)
@@ -940,14 +831,11 @@ async def feedback(interaction: discord.Interaction):
                         save_feedback_views(feedback_views)
                         persistent_views[feedback_msg_in_channel.id] = view
                 except discord.errors.HTTPException as e:
-                    print(f"Failed to send feedback to channel {feedback_channel_id}: {e}")
+                    logging.error(f"Failed to send feedback to channel {feedback_channel_id}: {e}")
         else:
-            print(f"Feedback channel {feedback_channel_id} not found or inaccessible")
-
-        # Clean up and confirm to user
+            logging.error(f"Feedback channel {feedback_channel_id} not found or inaccessible")
         await feedback_msg.delete()
         await interaction.delete_original_response()
-
         confirmation_embed = discord.Embed(
             title="Feedback Sent",
             description="Your feedback has been sent successfully.",
@@ -963,7 +851,6 @@ async def feedback(interaction: discord.Interaction):
         await working_message.edit(embed=confirmation_embed)
         await asyncio.sleep(30)
         await working_message.delete()
-
     except asyncio.TimeoutError:
         await interaction.delete_original_response()
         timeout_embed = discord.Embed(
@@ -977,22 +864,17 @@ async def feedback(interaction: discord.Interaction):
 
 @bot.command(name='feedback_unban', aliases=['Feedback_unban', 'feedback_Unban', 'Feedback_Unban'])
 async def feedback_unban(ctx):
-    """Unban a user from using the /feedback command."""
     with open(config_path, 'r') as f:
         config = json.load(f)
-
     if str(ctx.author.id) not in config['bot_developer_ids']:
         await ctx.send('You do not have permission to use this command.')
         return
-
     await ctx.send('Please provide the user ID to unban:')
     def check(m):
         return m.author == ctx.author and m.channel == ctx.channel
-
     try:
         msg = await bot.wait_for('message', check=check, timeout=30.0)
         user_id = msg.content.strip()
-
         feedback_bans = load_feedback_bans()
         if user_id in feedback_bans:
             del feedback_bans[user_id]
@@ -1010,19 +892,16 @@ async def increment_420_somewhere_count(num_servers=1):
         cheers_count['total_smoke_seshes_count'] = cheers_count['its_420_somewhere_count'] + cheers_count['manual_smoke_seshes_count']
         save_cheers_count(cheers_count)
         if debug_mode:
-            print(f"Incremented 420 somewhere count by {num_servers}. New value: {cheers_count['its_420_somewhere_count']}")
+            logging.info(f"Incremented 420 somewhere count by {num_servers}. New value: {cheers_count['its_420_somewhere_count']}")
 
-# Load cheers count data
 def load_cheers_count():
     with open('cheers-count.json', 'r') as f:
        return json.load(f)
 
-# Save cheers count data
 def save_cheers_count(data):
     with open('cheers-count.json', 'w') as f:
         json.dump(data, f, indent=4)
 
-# Increment the manual smoke seshes count
 async def increment_manual_smoke_seshes_count():
     async with cheers_count_lock:
         cheers_count = load_cheers_count()
@@ -1030,37 +909,32 @@ async def increment_manual_smoke_seshes_count():
         cheers_count['total_smoke_seshes_count'] = cheers_count['its_420_somewhere_count'] + cheers_count['manual_smoke_seshes_count']
         save_cheers_count(cheers_count)
 
-# Increment the play count for the sound
 async def increment_sound_play_count(sound_name):
     async with cheers_count_lock:
         cheers_count = load_cheers_count()
         cheers_count['sound_play_counts'][sound_name] = cheers_count['sound_play_counts'].get(sound_name, 0) + 1
         save_cheers_count(cheers_count)
 
-# Increment the local cheers count
 async def increment_local_cheers_count(guild_id):
     async with config_lock:
         server_config = load_or_create_server_config(guild_id)
         server_config['local_cheers_count'] = server_config.get('local_cheers_count', 0) + 1
         save_config(guild_id, server_config)
 
-# Auto-Join Task
 async def join_and_play_sound(guild, voice_channel, user):
     vc = None
     try:
         vc = await voice_channel.connect(reconnect=True)
-        print(f"Joined {voice_channel.name} in {guild.name}.")
+        logging.info(f"Joined {voice_channel.name} in {guild.name}.")
         await log_action(
             guild, "Joined Voice Channel",
             f"Joined **{voice_channel.name}** at {datetime.now(timezone.utc).strftime('%H:%M:%S')} UTC.",
             user
         )
-
         server_config = load_or_create_server_config(guild.id)
         mode = server_config.get("mode", "single")
         default_sound = server_config.get("default_sound", "Cheers_Bitch.mp3")
         available_sounds = get_available_sounds()
-
         if mode == "single":
             sound_to_play = os.path.join(SOUND_FOLDER, default_sound)
         else:
@@ -1068,31 +942,24 @@ async def join_and_play_sound(guild, voice_channel, user):
             if not enabled_sounds:
                 enabled_sounds = available_sounds
             sound_to_play = os.path.join(SOUND_FOLDER, random.choice(enabled_sounds))
-
         if vc.is_playing():
-            print(f"Already playing audio in {vc.channel.name} on {guild.name}.")
+            logging.info(f"Already playing audio in {vc.channel.name} on {guild.name}.")
             return
-
         audio_source = discord.FFmpegPCMAudio(sound_to_play, executable=ffmpeg_path)
         vc.play(audio_source)
-
-        # Increment counts using async functions
         sound_name = os.path.basename(sound_to_play).replace('.mp3', '')
         await increment_sound_play_count(sound_name)
         await increment_local_cheers_count(guild.id)
-
         while vc.is_playing():
             await asyncio.sleep(1)
         await log_action(guild, "Playing Sound", f"Played **{os.path.basename(sound_to_play)}** at {datetime.now(timezone.utc).strftime('%H:%M:%S')} UTC.", user)
         await asyncio.sleep(2)
     except Exception as e:
-        print(f"Error playing sound in {vc.channel.name if vc else 'unknown channel'} on {guild.name}: {e}")
+        logging.error(f"Error playing sound in {vc.channel.name if vc else 'unknown channel'} on {guild.name}: {e}")
     finally:
         if vc:
             await vc.disconnect()
             await log_action(guild, "Left Voice Channel", f"Disconnected from **{vc.channel.name}** at {datetime.now(timezone.utc).strftime('%H:%M:%S')} UTC.", user)
-        if audio_source:
-            audio_source.cleanup()
 
 @tasks.loop(seconds=1)
 async def auto_join_task():
@@ -1104,45 +971,38 @@ async def auto_join_task():
                 continue
             server_config = load_or_create_server_config(guild.id)
             join_frequency = server_config.get('join_frequency', 'every_hour')
-            
             if join_frequency == 'every_hour' and not guild.voice_client:
                 tasks.append(schedule_join_and_play(guild))
-        
         if tasks:
             await asyncio.gather(*tasks)
 
 async def schedule_join_and_play(guild):
     server_config = load_or_create_server_config(guild.id)
     blacklist_channels = server_config.get("blacklist_channels", [])
-    
     voice_channel = max(
         (vc for vc in guild.voice_channels if len(vc.members) > 0 and vc.id not in blacklist_channels),
         key=lambda vc: len(vc.members),
         default=None
     )
-    
     if not voice_channel:
         if debug_mode:
-            print(f"No populated voice channels in {guild.name}")
+            logging.info(f"No populated voice channels in {guild.name}")
         return
-
     vc = await join_voice_channel(guild, voice_channel, bot.user)
     if not vc:
-        print(f"Failed to join {voice_channel.name} in {guild.name}")
+        logging.error(f"Failed to join {voice_channel.name} in {guild.name}")
         return
-
     try:
-        # Wait 5 minutes (until X:20), checking connection periodically
         for _ in range(300):
             if not vc.is_connected():
-                print(f"Disconnected prematurely from {voice_channel.name} in {guild.name}")
+                logging.error(f"Disconnected prematurely from {voice_channel.name} in {guild.name}")
                 return
             await asyncio.sleep(1)
         await play_sound_and_leave(guild, vc, bot.user, is_automatic=True)
         if debug_mode:
-            print(f"Incremented its_420_somewhere_count for {guild.name}")
+            logging.info(f"Incremented its_420_somewhere_count for {guild.name}")
     except Exception as e:
-        print(f"Error during wait or play in {guild.name}: {e}")
+        logging.error(f"Error during wait or play in {guild.name}: {e}")
     finally:
         if vc and vc.is_connected():
             await vc.disconnect()
@@ -1151,16 +1011,14 @@ async def schedule_join_and_play(guild):
 async def join_and_play_420(guild):
     server_config = load_or_create_server_config(guild.id)
     blacklist_channels = server_config.get("blacklist_channels", [])
-    
     voice_channel = max(
         (vc for vc in guild.voice_channels if len(vc.members) > 0 and vc.id not in blacklist_channels),
         key=lambda vc: len(vc.members),
         default=None
     )
     if not voice_channel:
-        print(f"No populated voice channels in {guild.name}")
+        logging.info(f"No populated voice channels in {guild.name}")
         return
-
     vc = None
     try:
         vc = await voice_channel.connect(reconnect=True)
@@ -1168,17 +1026,15 @@ async def join_and_play_420(guild):
                     f"Joined **{voice_channel.name}** at {datetime.now(timezone.utc).strftime('%H:%M:%S')} UTC.", bot.user)
         await play_sound_and_leave(guild, vc, bot.user, is_automatic=True)
     except Exception as e:
-        print(f"Error in {guild.name}: {e}")
+        logging.error(f"Error in {guild.name}: {e}")
     finally:
         if vc and vc.is_connected():
             await vc.disconnect()
             await log_action(guild, "Left Voice Channel", f"Disconnected from **{voice_channel.name}** at {datetime.now(timezone.utc).strftime('%H:%M:%S')} UTC.", bot.user)
 
 async def join_all_populated_voice_channels(guild):
-    """Join the most populated voice channels in the specified guild."""
     server_config = load_or_create_server_config(guild.id)
     blacklist_channels = server_config.get("blacklist_channels", [])
-    
     voice_channel = max(
         (vc for vc in guild.voice_channels if len(vc.members) > 0 and vc.id not in blacklist_channels),
         key=lambda vc: len(vc.members),
@@ -1186,13 +1042,13 @@ async def join_all_populated_voice_channels(guild):
     )
     if voice_channel:
         if guild.voice_client and guild.voice_client.is_connected():
-            print(f"Bot is already in a voice channel in {guild.name}.")
+            logging.info(f"Bot is already in a voice channel in {guild.name}.")
         else:
-            print(f"Scheduling join for {voice_channel.name} in {guild.name}...")
-            await join_voice_channel(guild, voice_channel, bot.user)  # Join the voice channel
+            logging.info(f"Scheduling join for {voice_channel.name} in {guild.name}...")
+            await join_voice_channel(guild, voice_channel, bot.user)
     else:
         if debug_mode:
-            print(f"No valid voice channels to join in {guild.name}. Skipping join action.")
+            logging.info(f"No valid voice channels to join in {guild.name}. Skipping join action.")
 
 async def play_sound_in_all_channels(guild):
     if guild.voice_client and guild.voice_client.is_connected():
