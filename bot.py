@@ -18,6 +18,7 @@ from apscheduler.schedulers.asyncio import AsyncIOScheduler
 from discord import app_commands
 from dotenv import load_dotenv
 from datetime import datetime, timedelta, timezone
+import topgg  # Import topggpy for Top.gg API integration
 
 # Add logging setup
 import logging
@@ -53,6 +54,7 @@ load_dotenv()
 BOT_TOKEN = os.getenv('DISCORD_BOT_TOKEN')
 MASTER_GUILD_ID = int(os.getenv('MASTER_GUILD_ID'))
 TOPGG_AUTH_CODE = os.getenv('TOPGG_AUTH_CODE')
+TOPGG_API_TOKEN = os.getenv('TOPGG_API_TOKEN')
 
 # Config directory for each server
 CONFIG_DIR = 'configs'
@@ -341,6 +343,7 @@ intents.messages = True
 bot = AutoShardedBot(command_prefix="!", intents=intents)
 bot.save_config = save_config
 bot.command_prefix = "c."
+bot.topgg_client = None  # Initialize topgg_client as None, to be set in on_ready
 
 def is_developer(interaction: discord.Interaction) -> bool:
     with open(config_path, 'r') as f:
@@ -426,6 +429,19 @@ async def log_current_time_task():
     if now.minute % 5 == 0 and now.second == 0:
         logging.info(f"Current time is {now.strftime('%H:%M')}")
 
+# Task to post server count to Top.gg every 30 minutes
+@tasks.loop(minutes=30)
+async def update_topgg_stats():
+    if bot.topgg_client is None:
+        logging.error("Top.gg client not initialized, cannot post server count")
+        return
+    try:
+        server_count = len(bot.guilds)
+        await bot.topgg_client.post_guild_count(guild_count=server_count)
+        logging.info(f"Posted server count to Top.gg: {server_count} servers")
+    except Exception as e:
+        logging.error(f"Failed to post server count to Top.gg: {e}")
+
 scheduler = AsyncIOScheduler()
 
 def schedule_join_tasks():
@@ -456,6 +472,14 @@ async def on_ready():
     create_and_populate_server_logs()
     await update_server_list()
     
+    # Initialize Top.gg client
+    try:
+        bot.topgg_client = topgg.DBLClient(bot, TOPGG_API_TOKEN)  # Use API token
+        logging.info("Initialized Top.gg client")
+    except Exception as e:
+        logging.error(f"Failed to initialize Top.gg client: {e}")
+        bot.topgg_client = None
+
     if not auto_join_task.is_running():
         auto_join_task.start()
     
@@ -465,6 +489,11 @@ async def on_ready():
         name=f"{server_count} seshes | /help /vote"
     ))
     logging.info(f"Set status to 'Watching {server_count} seshes | /help /vote")
+
+    # Start the Top.gg stats update task
+    if bot.topgg_client and not update_topgg_stats.is_running():
+        update_topgg_stats.start()
+        logging.info("Started Top.gg stats update task")
 
     feedback_views = load_feedback_views()
     for message_id, data in feedback_views.items():
@@ -567,6 +596,13 @@ async def on_guild_join(guild):
         name=f"{server_count} seshes | /help /vote"
     ))
     logging.info(f"Updated status to 'Watching {server_count} seshes after joining {guild.name}")
+    # Update Top.gg server count immediately
+    if bot.topgg_client:
+        try:
+            await bot.topgg_client.post_guild_count(guild_count=server_count)
+            logging.info(f"Posted updated server count to Top.gg after joining {guild.name}: {server_count} servers")
+        except Exception as e:
+            logging.error(f"Failed to post server count to Top.gg after joining {guild.name}: {e}")
 
 @bot.event
 async def on_guild_remove(guild):
@@ -584,6 +620,13 @@ async def on_guild_remove(guild):
         name=f"{server_count} seshes | /help /vote"
     ))
     logging.info(f"Updated status to 'Watching {server_count} seshes after leaving {guild.name}")
+    # Update Top.gg server count immediately
+    if bot.topgg_client:
+        try:
+            await bot.topgg_client.post_guild_count(guild_count=server_count)
+            logging.info(f"Posted updated server count to Top.gg after leaving {guild.name}: {server_count} servers")
+        except Exception as e:
+            logging.error(f"Failed to post server count to Top.gg after leaving {guild.name}: {e}")
 
 class ApproveButton(ui.Button):
     def __init__(self, feedback_embed, feedback_msg, audio_files, user):
@@ -785,7 +828,7 @@ async def feedback(interaction: discord.Interaction):
         audio_count = 0
         audio_files = []
         for attachment in feedback_msg.attachments:
-            if attachment.filename.lower().endswith(('.mp3', '.m4a, .wav, .ogg')):
+            if attachment.filename.lower().endswith(('.mp3', '.m4a', '.wav', '.ogg')):
                 files.append(await attachment.to_file())
                 audio_count += 1
                 audio_files.append(attachment)
@@ -899,8 +942,11 @@ def load_cheers_count():
        return json.load(f)
 
 def save_cheers_count(data):
-    with open('cheers-count.json', 'w') as f:
-        json.dump(data, f, indent=4)
+    try:
+        with open('cheers-count.json', 'w') as f:
+            json.dump(data, f, indent=4)
+    except Exception as e:
+        logging.error(f"Error saving cheers-count.json: {e}")
 
 async def increment_manual_smoke_seshes_count():
     async with cheers_count_lock:
@@ -1023,7 +1069,7 @@ async def join_and_play_420(guild):
     try:
         vc = await voice_channel.connect(reconnect=True)
         await log_action(guild, "Joined Voice Channel", 
-                    f"Joined **{voice_channel.name}** at {datetime.now(timezone.utc).strftime('%H:%M:%S')} UTC.", bot.user)
+                        f"Joined **{voice_channel.name}** at {datetime.now(timezone.utc).strftime('%H:%M:%S')} UTC.", bot.user)
         await play_sound_and_leave(guild, vc, bot.user, is_automatic=True)
     except Exception as e:
         logging.error(f"Error in {guild.name}: {e}")
@@ -1057,33 +1103,28 @@ async def play_sound_in_all_channels(guild):
 async def join_voice_channel(guild, voice_channel, user):
     vc = None
     try:
-        # Check if the bot is already connected in this guild
         if guild.voice_client and guild.voice_client.is_connected():
             if guild.voice_client.channel == voice_channel:
-                print(f"Already connected to {voice_channel.name} in {guild.name}")
-                return guild.voice_client  # Reuse the existing connection
+                logging.info(f"Already connected to {voice_channel.name} in {guild.name}")
+                return guild.voice_client
             else:
-                # Disconnect from the current channel if it's different
                 await guild.voice_client.disconnect()
-
         vc = await voice_channel.connect(reconnect=True)
-        print(f"Joined {voice_channel.name} in {guild.name} at {datetime.now(timezone.utc).strftime('%H:%M:%S')} UTC")
+        logging.info(f"Joined {voice_channel.name} in {guild.name} at {datetime.now(timezone.utc).strftime('%H:%M:%S')} UTC")
         await log_action(
             guild, "Joined Voice Channel",
             f"Joined **{voice_channel.name}** at {datetime.now(timezone.utc).strftime('%H:%M:%S')} UTC.",
             user
         )
     except discord.errors.ClientException as e:
-        print(f"Failed to join {voice_channel.name} in {guild.name}: {e}")
+        logging.error(f"Failed to join {voice_channel.name} in {guild.name}: {e}")
         server_config = load_or_create_server_config(guild.id)
         admin_roles = server_config.get('admin_roles', [])
         log_channel_id = server_config.get('log_channel_id')
         log_channel = bot.get_channel(log_channel_id) if log_channel_id else None
-
         with open(config_path, 'r') as f:
             global_config = json.load(f)
         developer_id = global_config.get("bot_developer_ids", [])[0]
-
         message = (
             f"Hey! I tried to join the most populated voice channel {voice_channel.name} but didn't have permission to. "
             f"Error: {str(e)}. Please ensure I have 'Connect' and 'Speak' permissions, or use /blacklist to exclude this channel. "
@@ -1099,68 +1140,59 @@ async def join_voice_channel(guild, voice_channel, user):
                     break
         return None
     except discord.errors.ConnectionClosed as e:
-        print(f"Connection closed while joining {voice_channel.name} in {guild.name}: {e}")
+        logging.error(f"Connection closed while joining {voice_channel.name} in {guild.name}: {e}")
         return None
     except Exception as e:
-        print(f"Unexpected error joining {voice_channel.name} in {guild.name}: {e}")
+        logging.error(f"Unexpected error joining {voice_channel.name} in {guild.name}: {e}")
         return None
     return vc
 
 async def play_sound_and_leave(guild, vc, user, is_automatic=False):
     if not vc or not vc.is_connected():
-        print(f"Voice client invalid or disconnected in {guild.name}")
+        logging.error(f"Voice client invalid or disconnected in {guild.name}")
         return
-
     server_config = load_or_create_server_config(guild.id)
     mode = server_config.get("mode", "single")
     default_sound = server_config.get("default_sound", "Cheers_Bitch.mp3")
-    available_sounds = get_available_sounds()  # Returns filenames with .mp3
-
+    available_sounds = get_available_sounds()
     if mode == "single":
         sound_to_play = os.path.join(SOUND_FOLDER, default_sound)
         if not os.path.exists(sound_to_play):
-            print(f"Default sound {default_sound} not found for {guild.name}, falling back to Cheers_Bitch.mp3")
+            logging.error(f"Default sound {default_sound} not found for {guild.name}, falling back to Cheers_Bitch.mp3")
             sound_to_play = os.path.join(SOUND_FOLDER, "Cheers_Bitch.mp3")
-    else:  # random mode
-        # Filter enabled sounds based on sound_status_<sound> keys
+    else:
         enabled_sounds = [
             s for s in available_sounds
             if server_config.get(f"sound_status_{s}", True)
         ]
         if not enabled_sounds:
-            print(f"No enabled sounds for {guild.name}, falling back to all available sounds")
+            logging.error(f"No enabled sounds for {guild.name}, falling back to all available sounds")
             enabled_sounds = available_sounds
         sound_to_play = os.path.join(SOUND_FOLDER, random.choice(enabled_sounds))
-
     if not os.path.exists(sound_to_play):
-        print(f"Sound file not found: {sound_to_play}")
+        logging.error(f"Sound file not found: {sound_to_play}")
         return
-
     audio_source = None
     try:
         if not os.path.exists(ffmpeg_path):
-            print(f"FFmpeg not found at: {ffmpeg_path}")
+            logging.error(f"FFmpeg not found at: {ffmpeg_path}")
             return
-
         if vc.is_playing():
-            print(f"Already playing audio in {vc.channel.name} on {guild.name}")
+            logging.info(f"Already playing audio in {vc.channel.name} on {guild.name}")
             return
-
         audio_source = discord.FFmpegPCMAudio(sound_to_play, executable=ffmpeg_path)
         vc.play(audio_source)
-        print(f"Started playing {sound_to_play} in {vc.channel.name} at {datetime.now(timezone.utc).strftime('%H:%M:%S')} UTC")
-
+        logging.info(f"Started playing {sound_to_play} in {guild.name} | {vc.channel.name} at {datetime.now(timezone.utc).strftime('%H:%M:%S')} UTC")
         while vc.is_playing():
             await asyncio.sleep(1)
-
         sound_name = os.path.basename(sound_to_play).replace('.mp3', '')
         await increment_sound_play_count(sound_name)
         await increment_local_cheers_count(guild.id)
         if is_automatic:
             await increment_420_somewhere_count(1)
             if debug_mode:
-                print(f"Incremented its_420_somewhere_count for {guild.name}")
-        print(f"Finished playing {sound_to_play} in {vc.channel.name} at {datetime.now(timezone.utc).strftime('%H:%M:%S')} UTC")
+                logging.info(f"Incremented its_420_somewhere_count for {guild.name}")
+        logging.info(f"Finished playing {sound_to_play} in {guild.name} | {vc.channel.name} at {datetime.now(timezone.utc).strftime('%H:%M:%S')} UTC")
         await log_action(
             guild, "Playing Sound",
             f"Played **{os.path.basename(sound_to_play)}** at {datetime.now(timezone.utc).strftime('%H:%M:%S')} UTC.",
@@ -1168,11 +1200,11 @@ async def play_sound_and_leave(guild, vc, user, is_automatic=False):
         )
         await asyncio.sleep(2)
     except discord.errors.ClientException as e:
-        print(f"Client error playing sound in {vc.channel.name} on {guild.name}: {e}")
+        logging.error(f"Client error playing sound in {vc.channel.name} on {guild.name}: {e}")
     except Exception as e:
-        print(f"Error playing sound in {vc.channel.name} on {guild.name}: {e}")
+        logging.error(f"Error playing sound in {vc.channel.name} on {guild.name}: {e}")
         if "ffmpeg" in str(e).lower():
-            print(f"FFmpeg-specific error: {e}")
+            logging.error(f"FFmpeg-specific error: {e}")
     finally:
         if vc and vc.is_connected():
             await vc.disconnect()
@@ -1184,64 +1216,63 @@ async def play_sound_and_leave(guild, vc, user, is_automatic=False):
         if audio_source:
             audio_source.cleanup()
 
-@bot.tree.command(name="server-blacklist", description="Manage the server blacklist. Restricted to bot developers.")
-@app_commands.describe(action="Add, remove a server from the blacklist, or list all blacklisted servers.", server_id="The ID of the server to add or remove.", reason="The reason for blacklisting the server.")
-async def server_blacklist(interaction: discord.Interaction, action: str, server_id: str = None, reason: str = None):
-    if is_server_blacklisted(interaction.guild.id):
-        await handle_blacklisted_server(interaction)
-        return
+@bot.tree.command(name="server-blacklist", description="Manage the server blacklist. Restricted to developers.")
+@app_commands.describe(action="Action to perform: add, remove, or list", server_id="Server ID to add or remove")
+async def server_blacklist(interaction: discord.Interaction, action: str, server_id: str = None):
     if not is_developer(interaction):
         await interaction.response.send_message("You do not have permission to use this command.", ephemeral=True)
         return
 
     blacklisted_servers = load_blacklisted_servers()
+    action = action.lower()
 
-    if action.lower() == "add":
-        if server_id and reason:
-            guild = bot.get_guild(int(server_id))
-            if guild and not any(server['id'] == server_id for server in blacklisted_servers):
-                blacklisted_servers.append({
-                    "id": server_id,
-                    "name": guild.name,
-                    "owner": str(guild.owner_id),
-                    "reason": reason
-                })
-                save_blacklisted_servers(blacklisted_servers)
-                embed = discord.Embed(
-                    title="Server Blacklisted",
-                    description=f"Server with ID {server_id} has been blacklisted for the following reason: {reason}",
-                    color=discord.Color.red()
-                )
-                await interaction.response.send_message(embed=embed, ephemeral=True)
-            else:
-                await interaction.response.send_message(f"Server with ID {server_id} is already blacklisted or not found.", ephemeral=True)
-        else:
-            await interaction.response.send_message("Server ID and reason are required to add a server to the blacklist.", ephemeral=True)
-    elif action.lower() == "remove":
-        if server_id:
-            blacklisted_servers = [server for server in blacklisted_servers if server['id'] != server_id]
+    if action == "add":
+        if not server_id:
+            await interaction.response.send_message("Please provide a server ID.", ephemeral=True)
+            return
+        guild = bot.get_guild(int(server_id))
+        if not guild:
+            await interaction.response.send_message("Invalid server ID or bot is not in the server.", ephemeral=True)
+            return
+        if any(server['id'] == server_id for server in blacklisted_servers):
+            await interaction.response.send_message(f"Server {server_id} is already blacklisted.", ephemeral=True)
+            return
+        await interaction.response.send_message("Please provide a reason for blacklisting the server:", ephemeral=True)
+        def check_message(msg: discord.Message):
+            return msg.author == interaction.user and msg.channel == interaction.channel
+        try:
+            reason_msg = await bot.wait_for('message', timeout=60.0, check=check_message)
+            reason = reason_msg.content.strip()
+            blacklisted_servers.append({"id": server_id, "reason": reason})
             save_blacklisted_servers(blacklisted_servers)
-            embed = discord.Embed(
-                title="Server Removed from Blacklist",
-                description=f"Server with ID {server_id} has been removed from the blacklist.",
-                color=discord.Color.green()
-            )
-            await interaction.response.send_message(embed=embed, ephemeral=True)
-        else:
-            await interaction.response.send_message("Server ID is required to remove a server from the blacklist.", ephemeral=True)
-    elif action.lower() == "list":
-        if blacklisted_servers:
-            embed = discord.Embed(title="Blacklisted Servers", color=discord.Color.red())
-            for server in blacklisted_servers:
-                guild = bot.get_guild(int(server['id']))
-                if guild:
-                    owner_id = guild.owner_id if guild.owner else "Unknown"
-                    embed.add_field(name=guild.name, value=f"ID: {server['id']}\nOwner ID: <@{owner_id}>\nReason: {server['reason']}", inline=False)
-                else:
-                    embed.add_field(name="Unknown Server", value=f"ID: {server['id']}\nOwner ID: {server['owner']}\nReason: {server['reason']}", inline=False)
-            await interaction.response.send_message(embed=embed, ephemeral=True)
-        else:
+            await interaction.followup.send(f"Server {server_id} has been blacklisted. Reason: {reason}", ephemeral=True)
+            await reason_msg.delete()
+        except asyncio.TimeoutError:
+            await interaction.followup.send("Blacklist command timed out. Please try again.", ephemeral=True)
+
+    elif action == "remove":
+        if not server_id:
+            await interaction.response.send_message("Please provide a server ID.", ephemeral=True)
+            return
+        for server in blacklisted_servers:
+            if server['id'] == server_id:
+                blacklisted_servers.remove(server)
+                save_blacklisted_servers(blacklisted_servers)
+                await interaction.response.send_message(f"Server {server_id} has been removed from the blacklist.", ephemeral=True)
+                return
+        await interaction.response.send_message(f"Server {server_id} is not blacklisted.", ephemeral=True)
+
+    elif action == "list":
+        if not blacklisted_servers:
             await interaction.response.send_message("No servers are currently blacklisted.", ephemeral=True)
+            return
+        embed = discord.Embed(title="Blacklisted Servers", color=discord.Color.red())
+        for server in blacklisted_servers:
+            guild = bot.get_guild(int(server['id']))
+            name = guild.name if guild else f"Unknown (ID: {server['id']})"
+            embed.add_field(name=name, value=f"Reason: {server['reason']}", inline=False)
+        await interaction.response.send_message(embed=embed, ephemeral=True)
+
     else:
         await interaction.response.send_message("Invalid action. Please use 'add', 'remove', or 'list'.", ephemeral=True)
 
