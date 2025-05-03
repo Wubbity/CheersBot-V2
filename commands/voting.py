@@ -3,6 +3,7 @@ from discord import app_commands, ui
 from discord.ext import commands
 import json
 import os
+import sqlite3
 from datetime import datetime, timezone, timedelta
 from topgg import WebhookManager
 from aiohttp import web
@@ -16,6 +17,11 @@ class VotingCog(commands.Cog):
         self.server_list_file = os.path.join(os.path.dirname(os.path.abspath(__file__)), '..', 'server_logs', 'CheersServerList.json')
         self.vote_tracking_file = os.path.join(os.path.dirname(os.path.abspath(__file__)), '..', 'VoteTracking.json')
         self.auth_code = os.getenv('TOPGG_AUTH_CODE')
+        self.db_file = os.path.join(os.path.dirname(os.path.abspath(__file__)), '..', 'voters.db')
+        
+        # Initialize SQLite database
+        self.init_database()
+        
         self.load_or_create_cheers_tokens()
         self.load_or_create_server_list()
         self.load_or_create_vote_tracking()
@@ -25,8 +31,48 @@ class VotingCog(commands.Cog):
         self.webhook_manager.dbl_webhook('/webhook/topgg', self.on_topgg_vote_handler)
         self.bot.loop.create_task(self.start_webhook())
         
-        # Start the background task for cleaning up expired servers
+        # Start background tasks
         self.bot.loop.create_task(self.cleanup_expired_servers())
+        self.bot.loop.create_task(self.vote_reminder_task())
+
+    def init_database(self):
+        """Initialize the SQLite database and create the voters table if it doesn't exist."""
+        with sqlite3.connect(self.db_file) as conn:
+            cursor = conn.cursor()
+            cursor.execute("""
+                CREATE TABLE IF NOT EXISTS voters (
+                    user_id TEXT PRIMARY KEY,
+                    username TEXT,
+                    last_vote_time TEXT,
+                    server_name TEXT
+                )
+            """)
+            conn.commit()
+
+    def save_voter(self, user_id, username, last_vote_time, server_name):
+        """Save or update voter information in the database."""
+        with sqlite3.connect(self.db_file) as conn:
+            cursor = conn.cursor()
+            cursor.execute("""
+                INSERT OR REPLACE INTO voters (user_id, username, last_vote_time, server_name)
+                VALUES (?, ?, ?, ?)
+            """, (str(user_id), username, last_vote_time.isoformat(), server_name))
+            conn.commit()
+
+    def get_voter(self, user_id):
+        """Retrieve voter information from the database."""
+        with sqlite3.connect(self.db_file) as conn:
+            cursor = conn.cursor()
+            cursor.execute("SELECT * FROM voters WHERE user_id = ?", (str(user_id),))
+            result = cursor.fetchone()
+            if result:
+                return {
+                    "user_id": result[0],
+                    "username": result[1],
+                    "last_vote_time": datetime.fromisoformat(result[2]) if result[2] else None,
+                    "server_name": result[3]
+                }
+        return None
 
     def load_or_create_cheers_tokens(self):
         if not os.path.exists(self.cheers_tokens_file):
@@ -59,7 +105,6 @@ class VotingCog(commands.Cog):
         try:
             with open(self.server_list_file, 'r') as f:
                 data = json.load(f)
-                # Ensure both keys exist
                 if "active_servers" not in data:
                     data["active_servers"] = []
                 if "inactive_servers" not in data:
@@ -142,7 +187,7 @@ class VotingCog(commands.Cog):
         view.add_item(ui.Button(
             label="Vote Now",
             style=discord.ButtonStyle.link,
-            url=self.global_config.get("voting_url", "https://top.gg/bot/1294444615327285308")
+            url=self.global_config.get("voting_url", "https://top.gg/bot/1294444615327285308/vote")
         ))
 
         message = await interaction.response.send_message(embed=embed, view=view)
@@ -165,6 +210,19 @@ class VotingCog(commands.Cog):
             if guild_id == 0:
                 guild_id = inferred_guild_id if inferred_guild_id else 0
 
+            # Get user and guild information
+            user = await self.bot.fetch_user(user_id)
+            guild = self.bot.get_guild(guild_id) if guild_id else None
+            server_name = guild.name if guild else None
+
+            # Save voter information to database
+            self.save_voter(
+                user_id=user_id,
+                username=user.name,
+                last_vote_time=datetime.now(timezone.utc),
+                server_name=server_name
+            )
+
             tokens = self.load_cheers_tokens()
             user_id_str = str(user_id)
             tokens[user_id_str] = tokens.get(user_id_str, 0) + 1
@@ -173,13 +231,17 @@ class VotingCog(commands.Cog):
             voting_channel_id = int(self.global_config.get("developer_voting_channel_id", "0"))
             voting_channel = self.bot.get_channel(voting_channel_id)
             if voting_channel:
-                guild = self.bot.get_guild(guild_id) if guild_id else None
+                # Create embed based on whether server is known
                 embed = discord.Embed(
                     title="New Vote Received!",
-                    description=f"<@{user_id}> voted for CheersBot from **{guild.name if guild else 'Unknown Server'}**!",
                     color=discord.Color.gold(),
                     timestamp=datetime.now(timezone.utc)
                 )
+                if guild:
+                    embed.description = f"<@{user_id}> voted for CheersBot from **{guild.name}**!"
+                else:
+                    embed.description = f"<@{user_id}> voted for CheersBot!"
+                
                 embed.set_footer(
                     text=self.global_config.get("log_settings", {}).get("footer_text", "CheersBot V2.0 by HomiesHouse | Discord.gg/HomiesHouse"),
                     icon_url=self.global_config.get("log_settings", {}).get("footer_icon_url", "https://i.imgur.com/4OO5wh0.png")
@@ -197,7 +259,7 @@ class VotingCog(commands.Cog):
                             message = await channel.fetch_message(message_id)
                             thank_you_embed = discord.Embed(
                                 title="Thank You for Voting!",
-                                description=f"Thank you for voting for CheersBot, <@{user_id}>! You've earned **1 Cheers Token**.",
+                                description=f"Thank you for voting for CheersBot, <@{user_id}>! You've earned **1 Cheers Token**. You can vote again in 12 hours!",
                                 color=discord.Color.green()
                             )
                             thank_you_embed.set_thumbnail(url=self.global_config.get("thumbnail_url", "https://i.imgur.com/4OO5wh0.png"))
@@ -217,6 +279,87 @@ class VotingCog(commands.Cog):
             print(f"Error in vote handler: {e}")
             return web.json_response({"status": "error", "message": str(e)}, status=500)
 
+    async def vote_reminder_task(self):
+        """Check for users whose 12-hour vote cooldown has expired and send reminders."""
+        await self.bot.wait_until_ready()
+        while not self.bot.is_closed():
+            try:
+                with sqlite3.connect(self.db_file) as conn:
+                    cursor = conn.cursor()
+                    cursor.execute("SELECT user_id, username, last_vote_time FROM voters")
+                    voters = cursor.fetchall()
+
+                current_time = datetime.now(timezone.utc)
+                voting_channel_id = int(self.global_config.get("developer_voting_channel_id", "0"))
+                voting_channel = self.bot.get_channel(voting_channel_id)
+
+                for voter in voters:
+                    user_id, username, last_vote_time = voter
+                    last_vote = datetime.fromisoformat(last_vote_time)
+                    time_since_vote = current_time - last_vote
+
+                    if time_since_vote >= timedelta(hours=12):
+                        user = await self.bot.fetch_user(int(user_id))
+                        if user:
+                            # Send DM to user
+                            reminder_embed = discord.Embed(
+                                title="You Can Vote Again!",
+                                description=(
+                                    f"Hey {user.mention}, it's been 12 hours since your last vote for CheersBot! "
+                                    "You can vote again to earn another Cheers Token!\n\n"
+                                    f"[Vote Now]({self.global_config.get('voting_url', 'https://top.gg/bot/1294444615327285308/vote')})"
+                                ),
+                                color=discord.Color.blue()
+                            )
+                            reminder_embed.set_thumbnail(url=self.global_config.get("thumbnail_url", "https://i.imgur.com/4OO5wh0.png"))
+                            reminder_embed.set_footer(
+                                text=self.global_config.get("log_settings", {}).get("footer_text", "CheersBot V2.0 by HomiesHouse | Discord.gg/HomiesHouse"),
+                                icon_url=self.global_config.get("log_settings", {}).get("footer_icon_url", "https://i.imgur.com/4OO5wh0.png")
+                            )
+
+                            dm_success = False
+                            try:
+                                await user.send(embed=reminder_embed)
+                                dm_success = True
+                            except discord.Forbidden:
+                                print(f"Cannot send DM to {username} ({user_id}): DMs disabled")
+                            except Exception as e:
+                                print(f"Error sending DM to {username} ({user_id}): {e}")
+
+                            # Send reminder to developer voting channel
+                            if voting_channel:
+                                channel_embed = discord.Embed(
+                                    title="Vote Reminder Sent",
+                                    description=(
+                                        f"Reminder sent to <@{user_id}> to vote again."
+                                        f"\nDM Successful: {'Yes' if dm_success else 'No'}"
+                                    ),
+                                    color=discord.Color.blue(),
+                                    timestamp=datetime.now(timezone.utc)
+                                )
+                                channel_embed.set_footer(
+                                    text=self.global_config.get("log_settings", {}).get("footer_text", "CheersBot V2.0 by HomiesHouse | Discord.gg/HomiesHouse"),
+                                    icon_url=self.global_config.get("log_settings", {}).get("footer_icon_url", "https://i.imgur.com/4OO5wh0.png")
+                                )
+                                # Ghost ping
+                                ping_message = await voting_channel.send(f"<@{user_id}>")
+                                await ping_message.delete()
+                                await voting_channel.send(embed=channel_embed)
+
+                        # Update last_vote_time to prevent repeated reminders
+                        # Set to a future time to avoid immediate re-trigger
+                        self.save_voter(
+                            user_id=user_id,
+                            username=username,
+                            last_vote_time=last_vote,  # Keep original time for record
+                            server_name=self.get_voter(user_id).get("server_name")
+                        )
+
+                await asyncio.sleep(60)  # Check every minute
+            except Exception as e:
+                print(f"Error in vote_reminder_task: {e}")
+                await asyncio.sleep(60)  # Wait before retrying on error
+
     async def start_webhook(self):
         app = web.Application()
         app.router.add_post('/webhook/topgg', self.on_topgg_vote_handler)
@@ -233,7 +376,6 @@ class VotingCog(commands.Cog):
                 server_list = self.load_server_list()
                 current_time = datetime.now(timezone.utc)
                 
-                # Clean up active_servers
                 active_servers = server_list["active_servers"]
                 updated_active_servers = [
                     server for server in active_servers
@@ -241,14 +383,12 @@ class VotingCog(commands.Cog):
                     or server["end_time"] == "9999-12-31T23:59:59+00:00"
                 ]
                 
-                # Clean up inactive_servers
                 inactive_servers = server_list["inactive_servers"]
                 updated_inactive_servers = [
                     server for server in inactive_servers
                     if datetime.fromisoformat(server["end_time"]) > current_time
                 ]
                 
-                # Update server list if changes were made
                 if len(updated_active_servers) != len(active_servers) or len(updated_inactive_servers) != len(inactive_servers):
                     server_list["active_servers"] = updated_active_servers
                     server_list["inactive_servers"] = updated_inactive_servers
@@ -285,12 +425,10 @@ class VotingCog(commands.Cog):
         
         if action == "enable":
             server_config["server_list_enabled"] = True
-            # Check inactive_servers first
             existing_server = next((s for s in server_list["inactive_servers"] if s["guild_id"] == interaction.guild.id), None)
             if existing_server:
                 end_time = datetime.fromisoformat(existing_server["end_time"])
                 if end_time > datetime.now(timezone.utc):
-                    # Move from inactive to active with updated details
                     invite_url = await self.get_existing_invite(interaction.guild) or "No Invite Available"
                     existing_server["name"] = interaction.guild.name
                     existing_server["owner_id"] = f"<@{interaction.guild.owner_id}>"
@@ -304,14 +442,12 @@ class VotingCog(commands.Cog):
                         ephemeral=True
                     )
                 else:
-                    # Remove from inactive if expired
                     server_list["inactive_servers"] = [s for s in server_list["inactive_servers"] if s["guild_id"] != interaction.guild.id]
                     await interaction.response.send_message(
                         "Server list visibility has been enabled. The previous time has expired. Use `/buy servertime` to add time and list your server.",
                         ephemeral=True
                     )
             else:
-                # Check active_servers as a fallback (shouldn't normally happen)
                 existing_server = next((s for s in server_list["active_servers"] if s["guild_id"] == interaction.guild.id), None)
                 if existing_server and datetime.fromisoformat(existing_server["end_time"]) > datetime.now(timezone.utc):
                     await interaction.response.send_message(
@@ -328,7 +464,6 @@ class VotingCog(commands.Cog):
             server_config["server_list_enabled"] = False
             existing_server = next((s for s in server_list["active_servers"] if s["guild_id"] == interaction.guild.id), None)
             if existing_server:
-                # Move from active to inactive
                 server_list["active_servers"] = [s for s in server_list["active_servers"] if s["guild_id"] != interaction.guild.id]
                 server_list["inactive_servers"].append(existing_server)
                 await interaction.response.send_message(
@@ -385,7 +520,6 @@ class VotingCog(commands.Cog):
         guild = interaction.guild
         invite_url = await self.get_existing_invite(guild) or "No Invite Available"
 
-        # Check both active and inactive servers
         existing_server = next((s for s in server_list["active_servers"] if s["guild_id"] == guild.id), None)
         if not existing_server:
             existing_server = next((s for s in server_list["inactive_servers"] if s["guild_id"] == guild.id), None)

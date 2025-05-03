@@ -5,3 +5,5 @@
 /configs/*
 /server_logs/*
 /UserData/*
+ServerConfigs.db
+bot with database.py
